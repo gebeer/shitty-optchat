@@ -1,12 +1,13 @@
 // The turn (SPEC §5): one `claude -p` per user message, the rendered view as its input, and
 // everything it does logged as it happens. The event -> log mapping is a pure function.
-import { appendFileSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import type { Chat } from "./chat.ts";
 import { type Block, type Claude, baseArgs, spawnClaude } from "./claude.ts";
 import { CAP, MASTER_EFFORT, MASTER_MODEL, MASTER_PERMISSION, MASTER_TOOLS, PRIME_IDLE } from "./config.ts";
 import { createPrimer } from "./prime.ts";
 import { type Kind, built } from "./tree.ts";
+import { logUsage } from "./usage.ts";
 import { allBuilt, cutBlocks, render, settle } from "./view.ts";
 
 const PROMPTS = new URL("../prompts/", import.meta.url).pathname;
@@ -74,7 +75,7 @@ const usageLine = (r: any) => `(${n(r.usage?.input_tokens)} in · ${n(r.usage?.c
 // `onIdle`: called each time a turn loop ends (the REPL commits the data dir and shows the prompt there)
 export function createSession(o: { chat: Chat; out: Out; system: string; mcp: string; tap?: string; prime?: { idleMs: number } | false; onIdle?: () => void }) {
   const { chat, out } = o, args = masterArgs(o.system, o.mcp), queue: string[] = [];
-  const primer = o.prime === false ? null : createPrimer({ args, report: (m) => out.info(m) }), idleMs = (o.prime || { idleMs: PRIME_IDLE }).idleMs;
+  const primer = o.prime === false ? null : createPrimer({ args, report: (m) => out.info(m), onUsage: (model, usage) => logUsage(chat.dir, "prime", model, usage) }), idleMs = (o.prime || { idleMs: PRIME_IDLE }).idleMs;
   let call: Claude | null = null, sent: Sent[] = [], cancelled = false, stopped = false, abort: AbortController | null = null, loop: Promise<void> | null = null;
   let timer: ReturnType<typeof setTimeout> | undefined;
 
@@ -113,8 +114,8 @@ export function createSession(o: { chat: Chat; out: Out; system: string; mcp: st
     if (result.is_error) out.info(`error: ${clip(String(result.result), 300)}`);
     if (result.stop_reason === "refusal") out.info("the model refused this request (stop_reason: refusal)");
     out.info(usageLine(result));
-    try { appendFileSync(`${chat.dir}/usage.jsonl`, `${JSON.stringify({ date: new Date().toISOString(), usage: result.usage ?? null })}\n`); } // committed with the data dir
-    catch (e: any) { out.info(`usage.jsonl: ${e.message}`); }
+    const failed = logUsage(chat.dir, "turn", claude.model(), result.usage); // committed with the data dir
+    if (failed) out.info(failed);
     queue.unshift(...left); // not taken in time: a fresh call, with a new view
   }
 

@@ -4,6 +4,7 @@ import { acquireLock, appendMessage, committer, loadChat, newMsg } from "./store
 import { type Kind, type Mem } from "./tree.ts";
 import { addMessage } from "./view.ts";
 import { makeSummarizer } from "./summarize.ts";
+import { logUsage } from "./usage.ts";
 
 export type Chat = { dir: string; mem: Mem; pump: () => void; log: (kind: Kind, text: string) => void; close: () => void };
 
@@ -12,7 +13,7 @@ export async function openChat(dir: string, o: { summarize?: Summarize; report?:
   const release = await acquireLock(dir);
   try {
     const { mem, problems } = loadChat(dir);
-    const p = createPump({ mem, commit: committer(dir, mem), summarize: o.summarize ?? makeSummarizer(), report: o.report, jobs: o.jobs, retryMs: o.retryMs });
+    const p = createPump({ mem, commit: committer(dir, mem), summarize: o.summarize ?? makeSummarizer({ onCall: (c) => { const e = logUsage(dir, "compact", c.model, c.usage); if (e) o.report?.(e); } }), report: o.report, jobs: o.jobs, retryMs: o.retryMs });
     const log = (kind: Kind, text: string) => { // every message is logged and fsynced, then the pump looks for work (gist §7)
       const m = newMsg(mem.root.length, kind, text);
       appendMessage(dir, m);

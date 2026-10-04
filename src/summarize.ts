@@ -11,7 +11,7 @@ const PROMPTS = new URL("../prompts/", import.meta.url).pathname;
 export const COMPACT_FILE = `${PROMPTS}compact.txt`;
 export const SCALE = readFileSync(`${PROMPTS}scale.txt`, "utf8"); // a hand-written line of exactly NODE bytes
 
-export type CallInfo = { job: Job; attempt: number; usage: any; ms: number };
+export type CallInfo = { job: Job; attempt: number; model: string | undefined; usage: any; ms: number };
 
 const step = (job: Job) =>
   `For scale, this line is exactly ${NODE} bytes:\n${SCALE}\n\n` +
@@ -42,7 +42,7 @@ export function makeSummarizer(o: { timeoutMs?: number; onCall?: (c: CallInfo) =
       claude.send(blocks(job));
       for (;;) {
         const t0 = Date.now(), r = await claude.result();
-        o.onCall?.({ job, attempt: tries.length + 1, usage: r.usage, ms: Date.now() - t0 });
+        o.onCall?.({ job, attempt: tries.length + 1, model: claude.model(), usage: r.usage, ms: Date.now() - t0 });
         if (r.is_error) throw new Error(`claude: ${String(r.result ?? r.subtype).slice(0, 300)}`);
         if (r.stop_reason === "refusal") throw new Error("refused");
         const line = String(r.result ?? "").trim();

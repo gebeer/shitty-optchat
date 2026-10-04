@@ -9,6 +9,7 @@ import { parseOptmem } from "./import.ts";
 import { createKeys } from "./repl.ts";
 import { acquireLock, appendMessage, loadChat, newMsg } from "./store.ts";
 import { makeSummarizer } from "./summarize.ts";
+import { aggregate, hit, isoWeek } from "./usage.ts";
 import { type Mem, built, bytes, dayOf, getNode, label, newMem, span } from "./tree.ts";
 import { createMapper, createSession, masterArgs, mcpConfig, writeSystemPrompt } from "./turn.ts";
 import { PLACEHOLDER, addMessage, addNode, cutBlocks, first, refold, stats } from "./view.ts";
@@ -391,4 +392,25 @@ test("a bracketed paste is ONE message wherever the terminal cuts its chunks (ma
     [0, ...cuts].forEach((from, k, all) => feed(input.slice(from, all[k + 1])));
     expect(sent).toEqual(["alpha\nbeta\ngamma\nπ", "next"]);
   }
+});
+
+test("usage aggregation: local days and ISO weeks, legacy lines are turns, bad lines skipped", () => {
+  const at = (d: number, h: number) => new Date(2026, 9, d, h).toISOString(); // local times, October 2026
+  const u = (input: number, read: number, write: number, output: number) => ({ input_tokens: input, cache_read_input_tokens: read, cache_creation_input_tokens: write, output_tokens: output });
+  const text = [
+    { date: at(4, 23), usage: u(10, 80, 10, 5) }, // before kinds: a turn
+    { date: at(4, 1), kind: "compact", model: "m", usage: u(0, 50, 50, 7) },
+    { date: at(4, 2), kind: "prime", model: "m", usage: null },
+    { date: at(1, 12), kind: "turn", usage: u(1, 2, 3, 4) }, // Thursday of the previous ISO week
+    { date: at(1, 12), kind: "turn", usage: u(1, 0, 0, 0) },
+  ].map((e) => JSON.stringify(e)).join("\n") + "\nnot json\n";
+  const { day, week } = aggregate(text, new Date(2026, 9, 4, 23, 30), 3, 2);
+  expect(day.map((r) => r.period)).toEqual(["2026-10-02", "2026-10-03", "2026-10-04"]);
+  expect(day[2]).toMatchObject({ calls: { turn: 1, compact: 1, prime: 1 }, input: 10, read: 130, write: 60, output: 12 });
+  expect(hit(day[2])).toBe("65.0%");
+  expect(hit(day[0])).toBe("–");
+  expect(week.map((r) => r.period)).toEqual(["2026-W39", "2026-W40"]);
+  expect(week[1].calls).toEqual({ turn: 3, compact: 1, prime: 1 }); // Sun 4 Oct and Thu 1 Oct: both W40
+  expect(isoWeek(new Date(2026, 0, 1))).toBe("2026-W01");
+  expect(isoWeek(new Date(2027, 0, 1))).toBe("2026-W53");
 });

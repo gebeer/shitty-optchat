@@ -37,7 +37,7 @@ export function spawnClaude(args: string[], env: Record<string, string> = {}, ta
   child.exited.then(() => live.delete(child));
   const stderr = new Response(child.stderr).text(); // drained, so the pipe never fills
   const reader = child.stdout.getReader(), dec = new TextDecoder();
-  let buf = "";
+  let buf = "", model: string | undefined; // the model the stream reports (init, or message_start), for the usage log
   return {
     // A claude that died early closes its stdin: the write fails with EPIPE (thrown, or a rejected promise). That must not
     // escape: kill the child, so its output ends and next()/result() report its exit code and stderr, a readable error.
@@ -56,8 +56,12 @@ export function spawnClaude(args: string[], env: Record<string, string> = {}, ta
           const line = buf.slice(0, nl);
           buf = buf.slice(nl + 1);
           if (tap && line.trim()) appendFileSync(tap, `${line}\n`);
-          try { if (line.trim()) return JSON.parse(line); } catch {}
-          continue;
+          let ev: any;
+          try { ev = line.trim() && JSON.parse(line); } catch {}
+          if (!ev) continue;
+          if (ev.type === "system" && ev.subtype === "init" && ev.model) model = ev.model;
+          else if (ev.type === "stream_event" && ev.event?.type === "message_start" && ev.event.message?.model) model = ev.event.message.model;
+          return ev;
         }
         const { value, done } = await reader.read();
         if (done) return undefined;
@@ -75,6 +79,7 @@ export function spawnClaude(args: string[], env: Record<string, string> = {}, ta
       t.unref();
       child.exited.then(() => clearTimeout(t));
     },
+    model: () => model,
     exited: child.exited,
     stderr: () => stderr,
   };
