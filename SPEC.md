@@ -699,8 +699,8 @@ session `claude-e6` (Herdr pane `wR:p1`); the build session is `optchat-impl` (p
   (find the orchestrator with `herdr pane get wR:p1` and `ListAgents`) while work goes
   on. A final answer is delivered automatically, so don't send a separate completion
   message. A finding that breaks the design stops the work and goes into the report.
-- **Gate:** after step 4 the user asked for the handover (§16) and for work to wait until
-  told to go on with step 5. They may `/compact` first.
+- **Gate:** after steps 4 and 5 the user asked for the handover (§16) and for work to wait
+  until told to go on (step 5, then step 6). They may `/compact` first.
 - **Subscription:** use it sparingly. Keep model calls in tests tiny (the fake `claude`
   exists for that). Scratch data dirs only (`OPTCHAT_DIR` with a short path), never
   `~/.optchat`. Never commit proxy logs, request dumps or stream taps (they hold the
@@ -722,15 +722,15 @@ session `claude-e6` (Herdr pane `wR:p1`); the build session is `optchat-impl` (p
 
 ## 16. State of the build and how to continue
 
-Written at the end of step 4, so that a fresh session (or one after `/compact`) can go
-on from this file and `git log` alone.
+Written at the end of step 4 and updated at the end of step 5, so that a fresh session (or
+one after `/compact`) can go on from this file and `git log` alone.
 
 ### 16.0 Start here
 
 1. Read this file fully, then `docs/optchat-gist.md` (the base spec; this file lists every
    deviation from it).
-2. `git log --oneline` and `bun test` (expect 58 passing).
-3. Do not start step 5 until the user says so (§15, Gate).
+2. `git log --oneline` and `bun test` (expect 64 passing).
+3. Do not start step 6 until the user says so (§15, Gate).
 4. If something blocks, ask the orchestrator (`claude-e6`) with `SendMessage`.
 
 ### 16.1 Status
@@ -742,30 +742,31 @@ on from this file and `git log` alone.
 | 2 import-optmem, view, browse | 37546fa | done |
 | 3 compactor calls | d74a2a2 | done, §14 S1–S4 |
 | 4 mcp, turn without priming | 269d2cf | done, §14 T1–T3 |
-| 5 prime | – | **waiting for the user's go-ahead** (§16.6) |
-| 6 REPL polish | – | open (§16.7) |
+| 5 prime | 240cfac (orphan fix), d2d2968 (proxy), ff3d093 | done, §6 as built, §14 F1–F6 |
+| 6 REPL polish | – | **waiting for the user's go-ahead** (§16.7) |
 
-`bun test`: 58 tests in one file, ~1.1 s, no model calls. Commits 84bc1b5 and the
-handover commit only touch SPEC.md (and add `dev/wire.ts`). The REPL does not exist
-yet: `optchat` without a command prints the usage.
+`bun test`: 64 tests in one file, ~1.4 s, no model calls. Commits 84bc1b5 and d9d69f6 (the
+step 4 handover) and 9f415f7 (the proxy bound to loopback) are outside the steps. The
+REPL does not exist yet: `optchat` without a command prints the usage.
 
 ### 16.2 Code map (`src/`)
 
 | file | what it holds |
 |---|---|
-| `config.ts` | constants (gist §1, SPEC §2, `CALL_TIMEOUT`); env overrides `OPTCHAT_MODEL`, `OPTCHAT_PERMISSION_MODE`, `OPTCHAT_DIR` |
+| `config.ts` | constants (gist §1, SPEC §2, `CALL_TIMEOUT`, `KILL_GRACE`, `PRIME_*`); env overrides `OPTCHAT_MODEL`, `OPTCHAT_PERMISSION_MODE`, `OPTCHAT_DIR` |
 | `tree.ts` | types `Msg`/`Node`/`Coord`/`Mem`; `id+n` addressing (`span`, `label`, `coords`); `freeText`, `ready`; `built`/`getNode`/`setNode` (first write wins); `dayOf`, `localTime` |
 | `view.ts` | `fit`, `addMessage`/`addNode`, `refold`, `render`, `cutBlocks`, `allBuilt`, `first`, `context`, `settle`, `PLACEHOLDER`, `flat` |
 | `store.ts` | JSONL append (write + fsync), `loadChat`, `newMsg`, `committer` (persist + `addNode`), `acquireLock` |
 | `compactor.ts` | the pump: `createPump`, `buildFree`, `makeJob`, the `Job`/`Summarize` types |
 | `summarize.ts` | the real `Summarize`: layout A `blocks()`, retries, `cut()`, `SCALE`, `COMPACT_FILE`, `onCall` usage hook |
-| `claude.ts` | `spawnClaude` (`send`, `next`, `result`, `kill`, `stderr`, optional `tap`), `baseArgs` |
+| `claude.ts` | `spawnClaude` (`send`, `next`, `result`, `kill(grace)`, `stderr`, optional `tap`), `baseArgs`; the registry of running children and the exit/signal hooks that SIGTERM them (§5.2) |
 | `chat.ts` | `openChat`: lock + `loadChat` + pump + `log()` |
-| `turn.ts` | `writeSystemPrompt`, `mcpConfig`, `masterArgs`, `cap`, `createMapper`, `createSession` |
+| `prime.ts` | `createPrimer` (§6): `prime(view)`, `stop()` |
+| `turn.ts` | `writeSystemPrompt`, `mcpConfig`, `masterArgs`, `cap`, `createMapper`, `createSession` (the turn loop, foreground and idle priming, `input`/`cancel`/`stop`) |
 | `mcp.ts` | `TOOLS`, `zoom`, `date`, `serveMcp` |
 | `import.ts`, `browse.ts` | `parseOptmem`/`importOptmem`; `browseHtml` |
 | `cli.ts` | `view`, `browse`, `import-optmem`, `mcp` (the REPL is missing) |
-| `fake-claude.ts` | test double for `claude -p` (format in its header) |
+| `fake-claude.ts` | test double for `claude -p` (format in its header; exits on a closed stdin and on SIGTERM) |
 | `selfcheck.test.ts` | every test |
 | `fixtures/` | `turn-tools.jsonl`, `turn-thinking.jsonl`: real master streams, sanitized |
 
@@ -812,8 +813,10 @@ OPTCHAT_DIR=<dir> bun src/cli.ts browse out.html
 - Proxy: `LOG=<f>.jsonl PORT=8399 SYSDIR=<dir> bun dev/wire-proxy.ts &`, outside the
   repo; stop it by PID. It binds `127.0.0.1` only (it used to bind all interfaces, Bun's
   default); it forwards the caller's OAuth token upstream, so run it only while measuring.
-  Read it with `bun dev/wire.ts <f>.jsonl [last N]`. SYSDIR dumps full request bodies
-  minus long text and contain the userEmail reminder.
+  Read it with `bun dev/wire.ts <f>.jsonl [last N]` (it shows `ABORTED` and the
+  `ratelimit:` headers). The proxy cancels the upstream request when the client goes
+  away, so a killed priming call is really killed (§10, §14 F2). SYSDIR dumps full
+  request bodies minus long text and contain the userEmail reminder.
 - Children go through it with `ANTHROPIC_BASE_URL=http://127.0.0.1:8399` (OAuth works
   through it) and a scrubbed environment:
   `env -i HOME="$HOME" PATH="$PATH" ANTHROPIC_BASE_URL=… bun script.ts`.
@@ -827,41 +830,28 @@ OPTCHAT_DIR=<dir> bun src/cli.ts browse out.html
   1.25·write + 5·out.
 - Subscription used so far, roughly: Phase 0 about 50 requests (nine on opus at 12–24k
   tokens, the rest small); step 3 eight sonnet calls (the largest a cold 39k-token
-  write); step 4 about a dozen opus requests of 5–7k tokens and three thinking probes.
-  A few hundred thousand eq in all. Step 5 will cost the most: a ~128 KB view is ~40k
-  tokens, and the baseline and primed runs each write it once.
+  write); step 4 about a dozen opus requests of 5–7k tokens and three thinking probes;
+  step 5 about 540k eq (§14, after F6): twelve full-scale opus requests (a 128 KB view is
+  ~48k tokens, ~61k eq each time it is written), small checks and probes.
 
-### 16.6 Step 5 (prime), in detail
+### 16.6 Step 5 (prime): done
 
-1. `src/prime.ts` per §6. One `masterArgs(system, mcp)` for both calls; the priming spawn
-   adds `DISABLE_PROMPT_CACHING=1`. Message = every view block (`cutBlocks(render(mem))`,
-   up to 4) with `cache_control: {type: "ephemeral"}`, then a text block `ok`. Kill at the
-   first `stream_event` of type `message_start` (it already carries the final input
-   usage). Remember `{view, at}`; skip when the same view was primed less than
-   `PRIME_MAX_AGE` ago; on failure print once and go on.
-2. Hook in `turn()` (turn.ts): between `render` and `queue.splice(0)`, `await prime(view)`.
-   A cancel during the wait acts like a cancel in `settle` (log the queued messages as
-   `user`, break). Messages that arrive during priming join the same call. The blocks
-   passed to `ask()` must be the strings that were primed.
-3. Idle priming (§6): when the view is fully built and no call or turn runs, prime after
-   a ~1 s debounce. `mem.waiters` is called on every `fit()`, so a persistent listener
-   there can schedule it (never remove it).
-4. Tests with the fake `claude`: argv equals `masterArgs`, the 4 marks, `ok` last, killed
-   at `message_start` (a raw `stream_event` step), skipped when fresh, a failure doesn't
-   stop the turn, cancel during priming.
-5. Measure at full scale on opus (approved): a synthetic chat with a ~128 KB view
-   (~480 notes of ~270 bytes; each ≤ 506 bytes, so level-0 nodes are free; give
-   `openChat` `summarize: () => new Promise(() => {})` so the pump never calls a model for
-   the ~240 merges that aren't free). Report `in/read/write` per request for a
-   no-priming baseline turn, a cold primed turn and a primed turn after a tail change.
-   Keep it to a handful of opus requests.
-6. Billing of a killed priming request: make `dev/wire-proxy.ts` log **only** the
-   `anthropic-ratelimit-*` response headers (in the `res` record; never auth or any other
-   header) and compare the utilization change of a killed request with a completed one.
-   `rate_limit_event` utilization has 0.01 resolution (§14 T3), so unless the headers
-   are finer the answer is "inconclusive": say so, don't speculate. Keep repetitions
-   cheap and stop if the first pairs show no movement.
-7. Put the numbers into §6 and §14, commit, report, then step 6.
+Built as §6 "As built" says and measured as §14 F1–F6 says. To repeat the full-scale run
+(the scripts were scratch files, not in git):
+
+- A chat of 475 synthetic notes (~270 bytes each, varied templates, the first note carrying
+  a run id so that every run is a cache miss; each far below 512 bytes, so every level-0
+  node is free), opened with `openChat(dir, { summarize: () => new Promise(() => {}) })`
+  so the ~240 merges that aren't free never reach a model, and driven with
+  `createSession({ …, prime: false | { idleMs: 600_000 } })` and "Reply with just OK."
+  turns (one request each), through the proxy with a scrubbed environment. A warm-up turn
+  on a tiny chat comes first, so tools and system prompt are cached in every run.
+- Killed against completed priming: the same blocks sent by the real primer (killed at
+  `message_start`) and by `spawnClaude` (left to complete), one cold view each, with tiny
+  haiku probes between them (compactor flags, a one-line system prompt file) to read the
+  account utilization from the proxy's `rl` record.
+- Don't repeat the billing comparison without a better instrument: it cost ~250k eq and
+  ended inconclusive (F6).
 
 ### 16.7 Step 6 (REPL), in detail
 
@@ -869,7 +859,16 @@ OPTCHAT_DIR=<dir> bun src/cli.ts browse out.html
   `acquireLock`'s message), print the `problems` of the load, print the view (`render`),
   then read input. `createSession({ chat, out, system: writeSystemPrompt(DIR), mcp:
   mcpConfig(DIR) })` already does the rest: the `waiting for N summaries…` line, the
-  queue, mid-run delivery, cancel.
+  queue, mid-run delivery, cancel, and the priming (on by default, §6). Nothing is primed
+  at startup; the first turn primes in the foreground (+2–3 s), cheaply if the entries are
+  still cached.
+- On exit call `session.stop()` and `chat.close()`. `claude.ts` already SIGTERMs every
+  running child on `exit` and on SIGINT/SIGTERM/SIGHUP (it calls `process.exit(128 + n)`
+  for the signals), so restore the terminal in a `process.on("exit")` handler: it runs
+  after those signals too.
+- `out.info` is also called asynchronously (the compactor's `report`, a failed priming)
+  while the user may be typing: put a newline first when the cursor is mid-line, and
+  re-echo the prompt and the typed text after the line.
 - `Out` for the terminal: `text` raw; `thinking` dim (`ESC[2m … ESC[0m`); `info` on its
   own dim line, with a newline first if the cursor is mid-line. No cursor movement, no
   redraws (the scrollback must work).
@@ -907,5 +906,16 @@ OPTCHAT_DIR=<dir> bun src/cli.ts browse out.html
   on 2.1.289: re-check §14 P1–P3 (no leaks without `--safe-mode`, a stable prefix) after
   an upgrade, because a leak would silently break the prefix.
 - Real views have never been refused by the safety classifier (§13): every real call in
-  steps 3 and 4 passed. Synthetic word-salad views were refused 3 times in 10.
+  steps 3 to 5 passed, also the 475 templated (realistic) synthetic notes of step 5.
+  Synthetic word-salad views were refused 3 times in 10.
 - The model may think or not (T1); thinking text is not available, only its size.
+- Whether a request killed at `message_start` is billed is unknown (§14 F6, inconclusive);
+  §6 assumes it is billed in full. The kill also loses the race against a tiny response
+  now and then (F3): harmless.
+- A merge changes the view from the merge point on, and the blocks before it stay cached.
+  The next priming rewrites from the first changed block on; how often an early merge
+  forces a rewrite of everything (~48k tokens, ~61k eq at full size) in real use is
+  unmeasured. The tail-change case is F1. A view under 50k chars is one block, so each
+  append rewrites it (F5): cheap while it is small.
+- What a real `claude` does when its stdin closes (a harness killed with SIGKILL) is not
+  measured; the exit and signal hooks cover everything except SIGKILL (§5.2).
