@@ -811,7 +811,10 @@ OPTCHAT_DIR=<dir> bun src/cli.ts browse out.html
 - No test leaves a child behind: `afterEach` stops what the test started (`cleanups`:
   sessions, chats), then every fake named in the test's logs must be dead (a leaked one is
   killed and fails the test), and `afterAll` checks that no `fake-claude.ts` is left among
-  the run's children.
+  the run's children. `tmp()` dirs (and the `writeSystemPrompt` dir a rig makes) are removed
+  in `afterAll`, from inside bun; a run adds nothing to `/tmp`. (Before this, every run left
+  ~60 `optchat-*` dirs behind; production makes one `optchat-XXXXXX` system-prompt dir per
+  start and doesn't remove it.)
 - `src/fixtures/*.jsonl` are real master streams (a turn with MCP and Bash; a thinking
   block). To record one: `createSession({ …, tap: file })` or `spawnClaude(args, env,
   tap)` writes every raw stdout line; replace the `system/init` paths and plugin lists

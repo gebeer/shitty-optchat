@@ -2,6 +2,7 @@
 import { afterAll, afterEach, expect, test } from "bun:test";
 import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { dirname } from "node:path";
 import { openChat } from "./chat.ts";
 import { createPump } from "./compactor.ts";
 import { parseOptmem } from "./import.ts";
@@ -15,7 +16,8 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const tick = () => new Promise((r) => setImmediate(r));
 const until = async (ok: () => boolean, ms = 3000) => { for (const t = Date.now(); !ok(); await sleep(2)) if (Date.now() - t > ms) throw new Error("timeout"); };
 const user = (i: number, size: number) => newMsg(i, "user", "a".repeat(size - "user: ".length)); // "user: …" is exactly `size` bytes
-const tmp = () => mkdtempSync(`${tmpdir()}/optchat-test-`);
+const dirs: string[] = []; // every temp dir of the run, removed at the end (from inside bun)
+const tmp = () => (dirs[dirs.push(mkdtempSync(`${tmpdir()}/optchat-test-`)) - 1]);
 const mergeable = (mem: Mem) => mem.view.some((a, k) => { const b = mem.view[k + 1]; return b && a.l === b.l && a.i % 2 === 0 && b.i === a.i + 1 && built(mem, a.l + 1, a.i / 2); });
 
 // A fake `claude` for the code under test (fake-claude.ts has the script format). Outside fake() OPTCHAT_CLAUDE is /bin/false:
@@ -51,6 +53,7 @@ afterEach(async () => {
 const fakes = () => Bun.spawnSync(["pgrep", "-P", String(process.pid), "-f", "fake-claude.ts"]).stdout.toString().trim().split("\n").filter(Boolean).map(Number);
 afterAll(async () => {
   try { await until(() => fakes().length === 0, 2000); } catch { fakes().forEach((pid) => process.kill(pid, "SIGKILL")); throw new Error("a fake claude outlived the test run"); }
+  finally { dirs.forEach((d) => rmSync(d, { recursive: true, force: true })); }
 });
 
 // ---- view, pump -------------------------------------------------------------------------------------------------------
@@ -244,6 +247,7 @@ async function rig(script: object, prime: { idleMs: number } | false = false) {
   const f = fake(script);
   const { chat } = await openChat(dir, { summarize: async () => "a summary" });
   const { seen, out } = collector(), system = writeSystemPrompt(dir), mcp = mcpConfig(dir);
+  dirs.push(dirname(system)); // writeSystemPrompt makes a temp dir of its own
   const session = createSession({ chat, out, system, mcp, prime });
   cleanups.push(() => (session.stop(), chat.close()));
   return { chat, session, f, seen, system, mcp, kinds: () => chat.mem.root.slice(seed.length).map((m) => `${m.kind}: ${m.text}`) };
