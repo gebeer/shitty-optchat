@@ -13,7 +13,8 @@ using Claude Code (`claude -p`, subscription login) as the model engine.
 - **Evidence:** `docs/probes/cc-round1.md` and `docs/probes/cc-round2.md`, wire
   captures and usage tables from real `claude -p` runs (Claude Code 2.1.289,
   2026-10-04). Facts marked **[measured]** come from there. Facts marked
-  **[verify]** are not tested yet; check them in Phase 0 before relying on them.
+  **[phase 0]** were measured when the build started (same day and Claude Code
+  version, with `dev/wire-proxy.ts`); their evidence is in §14.
 
 Follow the gist exactly unless this document says otherwise. When you have to
 deviate, write the reason down in "Deviations" (§11).
@@ -72,6 +73,7 @@ overrides only where noted):
 | `MASTER_MODEL` | `opus` | env `OPTCHAT_MODEL`. Priming MUST use the same value. |
 | `MASTER_EFFORT` | `high` | passed as `--effort` |
 | `MASTER_TOOLS` | `Bash,Read,Edit,Write,Glob,Grep,WebFetch,WebSearch` | fixed list. No `Task`/`Agent` (no subagents in v1). |
+| `MASTER_PERMISSION` | `bypassPermissions` | env `OPTCHAT_PERMISSION_MODE`; `--permission-mode` of the master and of priming. See §4 and §14 P4: `claude -p` can't ask, so the default mode denies most tools. `dontAsk` plus an allowlist of the tools above also works. |
 | `COMPACT_MODEL` | `sonnet` | |
 | `COMPACT_EFFORT` | `medium` | gist §4.2: low effort overshoots far more |
 | `PRIME_MAX_AGE` | 270 s | re-prime when the last prime is older (5 min cache TTL minus margin) |
@@ -111,6 +113,10 @@ claude -p --model <M> --effort <E>
   --system-prompt-file <F> --tools <fixed list>
 ```
 
+The master and the priming call add `--mcp-config <F> --permission-mode <P>
+--replay-user-messages` (identical for both, §6). The compactor adds `--safe-mode`
+and no MCP. **Never `--safe-mode` on the master or priming** (below).
+
 Env for every call: `CLAUDE_CODE_PROMPT_CACHE_TTL=5m`. Without it, Claude Code
 uses 1 h marks on subscriptions, and a 5 m mark after a 1 h mark is a 400. The
 5 m TTL also follows gist §8 ("don't use 1-hour entries").
@@ -119,9 +125,10 @@ What Claude Code puts on the wire with a custom system prompt (`*` = cache mark)
 
 ```
 system:   [billing header, not cache-keyed] [*"You are a Claude agent, built on…" (forced with OAuth)] [*<system-prompt-file>]
-messages: user:   [<system-reminder> userEmail]  [your content blocks…]
+messages: user:   [<system-reminder> userEmail] [<system-reminder> git attribution]  [your content blocks…]
           system: [*env: cwd, OS, model, today's date]          ← after your content
           step≥2: assistant[* last block], user tool_result[* last block]  ← rolling marks
+tools:    the `--tools` list plus the MCP tools, sorted by name, no marks
 ```
 
 Consequences:
@@ -135,19 +142,27 @@ Consequences:
   marks are active.** It works in step 1, then step 2 fails with `400 Found 5`.
 - `DISABLE_PROMPT_CACHING=1` (or `DISABLE_PROMPT_CACHING_<MODEL>=1`) removes
   **all** of Claude Code's marks and keeps yours. Measured with the `_SONNET`
-  variant; **[verify]** that the generic variable behaves the same for opus.
+  variant in the probes, and **[phase 0]** with the generic variable on opus:
+  no marks on `system` or on the env message, the caller's marks untouched, no
+  400 (§14 P5).
 - Cache keys ignore `cache_control` placement and the billing header. A request
   without marks reads entries written by a request with marks, through the
   20-block lookback. This is what makes priming work (§6).
 - `--bare` refuses OAuth: don't use it.
-- **[verify] `--safe-mode` vs MCP:** the probes used `--safe-mode` (it disables
-  hooks, CLAUDE.md, plugins and MCP). The master needs the `optchat` MCP server
-  for zoom/date, so it can't use `--safe-mode` if that blocks `--mcp-config`.
-  In Phase 0, check with the wire proxy that, *without* `--safe-mode`,
-  `--setting-sources "" --strict-mcp-config` keeps hooks, plugins, CLAUDE.md
-  and skills out of the request, and the request start stays byte-identical
-  across two processes. If anything leaks, find the flag that removes it and
-  record it here.
+- **`--safe-mode` vs MCP [phase 0]:** `--safe-mode` also disables servers passed
+  with `--mcp-config` (`init.mcp_servers: []`, no `mcp__optchat__*` tools), so the
+  master and priming can't use it. Without it, `--setting-sources ""
+  --strict-mcp-config` is enough: hooks, plugins, skills, CLAUDE.md and
+  auto-memory stay out of the request (checked against a user config that has all
+  of them), and everything before the trailing env message is byte-identical
+  across processes and working directories (§14 P1–P3). The compactor has no MCP
+  and keeps `--safe-mode`.
+- **Permissions [phase 0]:** `claude -p` has nobody to answer prompts. In the
+  default mode it auto-denies `Bash` commands with output redirection, writes
+  outside the allowed paths and every MCP tool (`system/permission_denied`
+  events, the turn goes on without the result). The master runs with
+  `--permission-mode <MASTER_PERMISSION>` (§2). The flag doesn't change the
+  request (§14 P4).
 - Claude Code version upgrades change the request and invalidate the cache
   once. That's acceptable.
 
@@ -290,9 +305,12 @@ env: DISABLE_PROMPT_CACHING=1  CLAUDE_CODE_PROMPT_CACHE_TTL=5m
   tail *line* in its own block, mark the last one, and move `</chat>` to the
   start of the step block. **[measured, increment-sized blocks]** The next call
   finds the previous call's end mark 1–2 blocks back and writes only ~200 tokens:
-  about 6.5k eq per call, −38 %. **[verify]** that one block per line behaves
-  the same and that ~100+ blocks per request are accepted. Lookback reaches only
-  20 blocks, but the previous call's entry is 1–2 lines back.
+  about 6.5k eq per call, −38 %. **[phase 0]** One block per line behaves the
+  same: 305–334 blocks per request were accepted, and a call that adds 2 lines
+  reads the whole previous chat and writes ~30 tokens. The lookback is 20 blocks:
+  a call that adds 25 lines falls back to the 100k mark and rewrites its whole
+  tail (§14 P7). So B pays only while consecutive calls add ≤ ~20 lines to the
+  tail. Measure it on real runs before switching.
 
 **Size retries** (gist §4.3): stay in the same process. Write a stream-json
 follow-up user message with the gist's exact retry text and wait for the next
@@ -375,8 +393,11 @@ tool list.
   - the event→log mapping against a recorded stream-json fixture.
 - `dev/wire-proxy.ts`: a logging pass-through for `ANTHROPIC_BASE_URL`. It
   records only payload structure (block lengths, hashes, cache marks) and
-  usage, never headers. Use it in Phase 0 and to check cache behavior later.
-  Logs can contain short text heads: keep them out of git.
+  usage, never headers: a `req` record when the request arrives (so a killed
+  priming request still leaves its shape) and a `res` record with status and
+  usage when the response ends (late for killed requests, see §13). Use it in
+  Phase 0 and to check cache behavior later. Logs can contain short text heads:
+  keep them out of git (`.gitignore` covers its default output).
 
 ## 11. Deviations from the gist (keep this list current)
 
@@ -397,10 +418,10 @@ gives.
 
 ## 12. Build order
 
-0. **Phase 0, verification (before any feature work):** run the wire proxy and
-   settle every **[verify]** item: `--safe-mode` vs MCP for the master,
-   `DISABLE_PROMPT_CACHING` for opus, and layout B's per-line blocks if you get
-   to it. Write the findings into this file and adjust the plan.
+0. **Phase 0, verification (before any feature work): done 2026-10-04, §14.**
+   It settled the three **[verify]** items (`--safe-mode` vs MCP,
+   `DISABLE_PROMPT_CACHING` on opus, layout B's per-line blocks) and found the
+   permission-mode gap (§4). Nothing breaks the design; the plan below stands.
 1. `store`, `tree`, `view` plus `selfcheck` (pure; fake compactor).
 2. `import-optmem`, `view`, `browse`. Import the 116 notes into a scratch data
    dir and inspect them.
@@ -427,3 +448,51 @@ Each step ends with `bun test` green. No step introduces new dependencies.
 - Keep the tool list, system prompt file, MCP config, model and effort
   byte-identical between the priming call and the real call, and across turns.
   Any difference silently costs the whole view in cache writes.
+- With a proxy in between, a request whose client was killed keeps running
+  upstream, so its `res` record (usage) arrives seconds late. The `message_start`
+  event carries the same usage right away; read that for priming.
+- `--safe-mode` silently drops `--mcp-config` servers: the master would start
+  without zoom/date and nothing would fail (§14 P1). The turn's `system/init`
+  event lists the MCP servers with their status; check that `optchat` is
+  `connected` and warn if not.
+- The model alias `opus` resolves to `claude-opus-5-5` today (`sonnet` to
+  `claude-sonnet-5-5`). An alias change invalidates every cache entry once.
+
+## 14. Phase 0 findings (2026-10-04, Claude Code 2.1.289)
+
+**Method.** `dev/wire-proxy.ts` as `ANTHROPIC_BASE_URL` (OAuth works through it),
+scrubbed child env (HOME, PATH and a few basics, so no inherited `CLAUDE_CODE_*`),
+tiny prompts, a stub stdio MCP server with the final tool shapes, throwaway driver
+scripts and logs outside the repo. The test account's real config has hooks
+(SessionStart, PreToolUse, …), 6 plugins, user skills, a global CLAUDE.md that also
+sits on the repo's ancestor path, auto-memory and `model: opus[1m]`: the worst case
+for leaks. Units: in / read / write = `input_tokens` / `cache_read_input_tokens` /
+`cache_creation_input_tokens`.
+
+| # | Question | Result |
+|---|---|---|
+| P1 | `--safe-mode` with `--mcp-config` | **MCP is dropped**: `init.mcp_servers: []`, tools `Bash,Read` only. Without `--safe-mode`: `optchat` connected, tools `Bash,Read,mcp__optchat__date,mcp__optchat__zoom`. |
+| P2 | Does anything leak without `--safe-mode`, with `--setting-sources "" --strict-mcp-config`? | **No.** Request = `system[billing, identity line, our file]`, tools, `user[userEmail, git attribution, our blocks]`, env message. Nothing from hooks, skills, CLAUDE.md, plugins or memory: 19 distinctive strings from the user's CLAUDE.md, plugin names, hook text and memory index gave 0 hits over all 28 request bodies of the phase. 3 tool-using runs with `--include-hook-events`: 0 hook events (user hooks don't run). A `CLAUDE_CODE_PLUGIN_DIRS` var in the child env still loads that plugin (`init.plugins`), but nothing reached the request, so the harness doesn't scrub the env. `init` still lists built-in skills, slash commands and agents; none of them reach the request. |
+| P3 | Is the request start byte-identical across processes and cwds? | **Yes.** Two processes, same cwd: all 10 block hashes identical (billing header excluded), second process `in=2 read=3409 write=0`. Other cwd (not in git, outside `~/.claude`): identical through our content; only the trailing env message differs (452 vs 382 chars: path, git yes/no), `read=3239 write=215`. Tools are the `--tools` list plus MCP tools **sorted by name**, descriptions static (no date or path; WebSearch says "current month is (provided in the conversation below)"). The env message can also carry other volatile text (e.g. a token-budget line appeared in one run only); it is after our content, so harmless. |
+| P4 | Permissions in `-p` | Default mode: `Bash` `echo hi > b.txt` is denied ("Output redirection … needs approval"), `mcp__optchat__date` is denied ("requested permissions … you haven't granted it yet"), 2 `permission_denied` events, no hang, turn ends normally. `--permission-mode bypassPermissions`: both run (`hi`, `2026-10-04 14:03`). `--permission-mode dontAsk --allowedTools <8 tools + 2 MCP>`: both run. Request hashes identical across all three: the flag isn't in the request. |
+| P5 | `DISABLE_PROMPT_CACHING=1` (generic) on opus | Prime request on the wire: **0 marks on `system`, none on the env message or the `ok` block, 4 marks = exactly ours** (the 4 view blocks). Real turn, Claude Code marks on, no view marks: 3 marks in step 1 (2 system + env), 4 in step 2. No 400 in 9 opus requests. |
+| P6 | Priming on opus, small scale (view ≈ 6.4k tokens in 4 blocks, tools+system ≈ 5.4k tokens, 4 marks) | Fully cold: prime `in=384 read=0 write=11878` (killed at `message_start`). With a new view over cached tools+system: prime `read=5436 write=6442` → real step 1 `in=2 read=11878 write=414`, step 2 `read=12292 write=125`. Tail changed by +498 chars (N+1): prime `read=9565 write=2498` → real step 1 `read=12063 write=414`, step 2 `read=12477 write=125`. Prime and real hashes identical up to the last block. Same as the Sonnet probes: the primed view is read in full, also after a tail change. |
+| P7 | Layout B: one block per line, 100+ blocks | Compactor flags (`sonnet`, `--safe-mode --tools ""`, `DISABLE_PROMPT_CACHING=1`), 3 marked context blocks, 300+ one-line tail blocks. c0 cold: `write=9529` (305 blocks). **c1 (+2 lines, 307 blocks): `read=9529 write=32`. c2 (+2): `read=9561 write=26`.** c3 (+25 lines, 334 blocks): `read=4952 write=5064`, so beyond the 20-block lookback it falls back to the 3rd mark and rewrites the whole tail. No limit on block count was hit. |
+| P8 | Other facts needed later | Opus `contextWindow` is 1,000,000 (`result.modelUsage`), so no autocompact inside a turn. `result` has `usage`, `modelUsage`, `stop_reason`, `terminal_reason`, `permission_denials`, `queued_turn_count`, `total_cost_usd`. Event order per turn matches §5.3; the replay of the opening message carries all its blocks, view included (skip it). Killed with SIGTERM: exit 143, no orphaned MCP child, no files under `~/.claude/projects`. No thinking blocks showed up in these trivial runs. |
+
+**Decisions taken because of Phase 0**
+
+- Master and priming: no `--safe-mode`; add `--permission-mode <MASTER_PERMISSION>`
+  (default `bypassPermissions`, §2). **This default is the user's call:** it gives the
+  model unrestricted Bash/Edit/Write on the machine. The tighter alternative,
+  `dontAsk` plus an allowlist of the 10 tools, also worked in the probe.
+- One `masterArgs()` builds the argv for both the master and the priming call, so
+  they can't drift apart.
+- Layout A first for the compactor, as planned. Layout B stays optional (§7).
+- The turn code checks `system/init` for the `optchat` MCP server (§13).
+- `dev/wire-proxy.ts` now logs the request on arrival (see §10).
+
+**Not measured yet** (do it where the step needs it): priming at full scale on opus
+(step 5), whether a request killed at `message_start` is billed in full (assumed),
+thinking blocks and long tool loops in the stream (step 4), the meaning of
+`queued_turn_count` (not needed: the harness kills at the first `result`).
