@@ -741,8 +741,8 @@ OPTCHAT_DIR=<dir> bun src/cli.ts browse out.html
 ### 16.5 Measurement recipe (the scripts used so far were scratch files, not in git)
 
 - Proxy: `LOG=<f>.jsonl PORT=8399 SYSDIR=<dir> bun dev/wire-proxy.ts &`, outside the
-  repo; stop it by PID. It binds **all interfaces** (Bun's default): run it only while
-  measuring, and add `hostname: "127.0.0.1"` to its `Bun.serve` when you next touch it.
+  repo; stop it by PID. It binds `127.0.0.1` only (it used to bind all interfaces, Bun's
+  default); it forwards the caller's OAuth token upstream, so run it only while measuring.
   Read it with `bun dev/wire.ts <f>.jsonl [last N]`. SYSDIR dumps full request bodies
   minus long text and contain the userEmail reminder.
 - Children go through it with `ANTHROPIC_BASE_URL=http://127.0.0.1:8399` (OAuth works

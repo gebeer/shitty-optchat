@@ -31,6 +31,7 @@ function shape(body: any) {
 }
 
 Bun.serve({
+  hostname: "127.0.0.1", // loopback only: the proxy forwards the caller's OAuth token upstream
   port: Number(process.env.PORT ?? 8399),
   idleTimeout: 0,
   async fetch(req) {
