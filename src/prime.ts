@@ -25,7 +25,7 @@ export function createPrimer(o: { args: string[]; report: (m: string) => void })
           return;
         }
       }
-      throw new Error(timedOut ? `no response after ${PRIME_TIMEOUT / 1000}s` : `claude exited (code ${await claude.exited}): ${(await claude.stderr()).trim().slice(-300)}`);
+      throw new Error(timedOut ? `no response after ${PRIME_TIMEOUT / 1000}s` : `claude exited (code ${await claude.exited}): ${(await claude.stderr()).trim().slice(-300) || "no error output"}`);
     } catch (e: any) {
       if (!failed) o.report(`priming failed, the turn goes on without it: ${e.message}`);
       failed = true;

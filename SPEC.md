@@ -263,6 +263,11 @@ registered; on exit and on SIGINT/SIGTERM/SIGHUP each gets SIGTERM, and `kill()`
 SIGKILL when a child is still there after `KILL_GRACE` (5 s). The harness's own SIGKILL
 can't be hooked: the children then end when their stdin closes (the fake `claude` does;
 a real one is not measured). Every spawn site kills in a `finally`.
+A child that dies early closes its stdin: `send` catches the EPIPE (thrown or a rejected
+promise) and kills the child, so its output ends and the caller reports `claude exited
+(code C)` with its stderr. Only that turn, compactor call or priming fails. Bun 1.4.2 also
+rejects an internal promise with the same EPIPE; `reapChildren` drops that one (an
+`unhandledRejection` hook for `EPIPE`/`write` only, everything else still crashes).
 
 ### 5.3 Event → log mapping
 
@@ -478,8 +483,9 @@ inline JSON string built once (`mcpConfig(dir)`) that launches `bun src/cli.ts m
   - Ctrl-C cancels the current wait or turn; a second Ctrl-C while idle exits.
   - **As built** (`repl.ts`, `persist.ts`; `cli.ts` calls `repl(DIR)` when there is no command).
     Start: lock (a second process exits 1 with `optchat: another optchat is already running
-    on <dir>`), the reaper of §5.2 armed, the load `problems` on stderr, the last 20 view
-    lines (a dim `… N earlier view lines (optchat view)` above them when there are more;
+    on <dir>`), the reaper of §5.2 armed, the load `problems` on stderr, the last 5 view
+    lines of one user or talk message each, every one cut to one terminal row with `…`
+    (a dim `… N earlier view lines (optchat view)` above them when there are more;
     `optchat view` prints the whole view), a dim header of three lines from `stats(mem)`
     in `view.ts` plus the REPL (`optchat: N messages, FIRST → LAST, last 2h ago`;
     `view 41.6/128 KB (32%), L lines · P summaries pending[, K view lines unsummarized]`,

@@ -46,7 +46,15 @@ export function createKeys(on: { text(s: string): void; key(k: Key): void }) {
   };
 }
 
-const TAIL = 20; // view lines shown at startup
+const TAIL = 5; // user and talk lines shown at startup
+// `s` cut to `cols` terminal columns, an ellipsis marking the cut
+function row(s: string, cols: number) {
+  s = s.replace(/\t/g, " ");
+  if (Bun.stringWidth(s) <= cols) return s;
+  let out = "", used = 1; // the ellipsis takes one column
+  for (const ch of s) { const cw = Bun.stringWidth(ch); if (used + cw > cols) break; out += ch; used += cw; }
+  return `${out}…`;
+}
 const dim = (s: string) => `\x1b[2m${s}\x1b[22m`;
 const plain = (s: string) => s.replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, ""); // all but \n and \t: what the model or a tool printed must not drive the terminal
 
@@ -149,9 +157,11 @@ export async function repl(dir: string, o: Parameters<typeof openChat>[1] = {}) 
   session = createSession({ chat, out, system, mcp: mcpConfig(dir), onIdle: () => { working = false; void persist(); show(); } });
 
   problems.forEach((p) => console.error(p));
-  const lines = render(chat.mem).split("\n").slice(1, -1); // the view's lines without the <chat> tags; `optchat view` shows them all
-  if (lines.length > TAIL) out.info(`… ${lines.length - TAIL} earlier view lines (optchat view)`);
-  w(lines.slice(-TAIL).map((l) => `${plain(l)}\n`).join(""));
+  // the last user and talk lines of the view, one terminal row each; `optchat view` shows them all
+  const lines = render(chat.mem).split("\n").slice(1, -1), view = chat.mem.view;
+  const tail = lines.filter((_, k) => view[k].l === 0 && ["user", "talk"].includes(chat.mem.root[view[k].i].kind)).slice(-TAIL);
+  if (lines.length > tail.length) out.info(`… ${lines.length - tail.length} earlier view lines (optchat view)`);
+  w(tail.map((l) => `${row(plain(l), process.stdout.columns || 80)}\n`).join(""));
   const [when, fill] = stats(chat.mem);
   out.info(`optchat: ${when}`);
   if (fill) out.info(fill);

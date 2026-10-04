@@ -12,6 +12,9 @@ export function reapChildren() { // armed by the first spawn; the REPL arms it a
   if (hooked) return;
   hooked = true;
   process.on("exit", () => live.forEach((c) => c.kill()));
+  // Bun (1.4.2): a write to a dead child's stdin throws EPIPE, which `send` catches, AND rejects an internal promise nobody
+  // holds with the same error. Drop that twin; any other unhandled rejection still ends the process as Bun's default does.
+  process.on("unhandledRejection", (e: any) => { if (e?.code === "EPIPE" && e?.syscall === "write") return; throw e; });
   for (const [sig, no] of [["SIGINT", 2], ["SIGHUP", 1], ["SIGTERM", 15]] as const) process.on(sig, () => process.exit(128 + no)); // runs the exit hook
 }
 
@@ -36,9 +39,14 @@ export function spawnClaude(args: string[], env: Record<string, string> = {}, ta
   const reader = child.stdout.getReader(), dec = new TextDecoder();
   let buf = "";
   return {
+    // A claude that died early closes its stdin: the write fails with EPIPE (thrown, or a rejected promise). That must not
+    // escape: kill the child, so its output ends and next()/result() report its exit code and stderr, a readable error.
     send(blocks: Block[]) {
-      child.stdin.write(JSON.stringify({ type: "user", message: { role: "user", content: blocks } }) + "\n");
-      child.stdin.flush();
+      const dead = () => child.kill();
+      try {
+        for (const r of [child.stdin.write(JSON.stringify({ type: "user", message: { role: "user", content: blocks } }) + "\n"), child.stdin.flush()])
+          if (r instanceof Promise) r.catch(dead);
+      } catch { dead(); }
     },
     // the next event, undefined when the process closed its output
     async next(): Promise<any> {
@@ -59,7 +67,7 @@ export function spawnClaude(args: string[], env: Record<string, string> = {}, ta
     // the next `result` event; throws if the process ends first
     async result(): Promise<any> {
       for (let e; (e = await this.next()); ) if (e.type === "result") return e;
-      throw new Error(`claude exited (code ${await child.exited}) before its result: ${(await stderr).trim().slice(-300)}`);
+      throw new Error(`claude exited (code ${await child.exited}) before its result: ${(await stderr).trim().slice(-300) || "no error output"}`);
     },
     kill(grace = KILL_GRACE) { // SIGTERM, and SIGKILL if it is still there after `grace` ms
       child.kill();
