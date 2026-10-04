@@ -1,12 +1,13 @@
 // Selfcheck: no model calls. The compactor is a fake, the data dirs are temp dirs.
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { appendFileSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { browseHtml } from "./browse.ts";
-import { createPump } from "./compactor.ts";
-import { NODE } from "./config.ts";
+import { type Job, createPump } from "./compactor.ts";
+import { NODE, TRIES } from "./config.ts";
 import { importOptmem, parseOptmem } from "./import.ts";
 import { acquireLock, appendMessage, appendNode, loadChat, newMsg } from "./store.ts";
+import { COMPACT_FILE, SCALE, type CallInfo, blocks, cut, makeSummarizer } from "./summarize.ts";
 import { type Mem, built, bytes, coords, dayOf, freeText, getNode, label, newMem, ready, setNode, span } from "./tree.ts";
 import { PLACEHOLDER, addMessage, addNode, allBuilt, context, cutBlocks, first, refold, render, settle } from "./view.ts";
 
@@ -385,5 +386,116 @@ describe("import-optmem, view, browse", () => {
     expect(readFileSync(out, "utf8")).toContain("<title>OptChat</title>");
     expect(run("import-optmem", logFile()).exitCode).toBe(1); // not empty any more
     expect(run("nope").exitCode).toBe(2);
+  });
+});
+
+describe("compactor calls (fake claude, no model)", () => {
+  const msgJob = (text = "hi", ctx: string[] = []): Job => ({ l: 0, i: ctx.length, ctx, msg: newMsg(ctx.length, "user", text) });
+  const mergeJob = (a: string, b: string, ctx: string[] = []): Job => ({ l: 1, i: 0, ctx, a, b });
+  const FAKE = `${import.meta.dir}/fake-claude.ts`;
+  const alive = (pid: number) => { try { return process.kill(pid, 0); } catch { return false; } };
+  function fake(script: object[]) {
+    const dir = tmp(), log = `${dir}/log.jsonl`;
+    writeFileSync(log, "");
+    writeFileSync(`${dir}/script.json`, JSON.stringify(script));
+    Object.assign(process.env, { OPTCHAT_CLAUDE: FAKE, FAKE_CLAUDE_LOG: log, FAKE_CLAUDE_SCRIPT: `${dir}/script.json` });
+    const entries = () => readFileSync(log, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    return { starts: () => entries().filter((e) => e.argv), messages: () => entries().filter((e) => e.message).map((e) => e.message.message.content) };
+  }
+  afterEach(() => { for (const k of ["OPTCHAT_CLAUDE", "FAKE_CLAUDE_LOG", "FAKE_CLAUDE_SCRIPT"]) delete process.env[k]; });
+
+  test("SCALE is exactly NODE bytes with no newline, compact.txt is the gist's COMPACT prompt verbatim", () => {
+    expect(bytes(SCALE)).toBe(NODE);
+    expect(SCALE.includes("\n")).toBe(false);
+    expect(readFileSync(`${import.meta.dir}/../prompts/scale.txt`).length).toBe(NODE);
+    const gist = readFileSync(`${import.meta.dir}/../docs/optchat-gist.md`, "utf8");
+    const fenced = /```\n([\s\S]*?)\n```/.exec(gist.slice(gist.indexOf("### 4.4 The compactor prompt (COMPACT), verbatim")))![1];
+    expect(readFileSync(COMPACT_FILE, "utf8")).toBe(fenced);
+  });
+  test("blocks: a short chat is one marked block, the step comes after it unmarked", () => {
+    const b = blocks(msgJob("hello\nworld", ["line one", "line two"]));
+    expect(b.length).toBe(2);
+    expect(b[0]).toEqual({ type: "text", text: "<chat>\nline one\nline two\n</chat>", cache_control: { type: "ephemeral" } });
+    expect(b[1].cache_control).toBeUndefined();
+    expect(b[1].text).toBe(`For scale, this line is exactly 512 bytes:\n${SCALE}\n\nCompress this message into one line, in at most 512 bytes:\nuser: hello\nworld`);
+  });
+  test("blocks: a merge flattens the two lines; an empty chat is still one block", () => {
+    const b = blocks(mergeJob("a\nb", "c d"));
+    expect(b[0].text).toBe("<chat>\n</chat>");
+    expect(b[1].text.endsWith("Merge these two lines into one, in at most 512 bytes:\na b\nc d")).toBe(true);
+  });
+  test("blocks: a long chat is cut at the 50k/80k/100k marks, every piece marked, the step not", () => {
+    const ctx = Array.from({ length: 700 }, (_, i) => `${i} ${"y".repeat(248)}`);
+    const b = blocks(msgJob("x", ctx));
+    expect(b.length).toBe(5);
+    expect(b.slice(0, 4).every((x) => x.cache_control?.type === "ephemeral")).toBe(true);
+    expect(b[4].cache_control).toBeUndefined();
+    expect(b.slice(0, 4).map((x) => x.text).join("")).toBe(`<chat>\n${ctx.join("\n")}\n</chat>`);
+    let at = 0;
+    [50_000, 80_000, 100_000].forEach((mark, k) => {
+      at += b[k].text.length;
+      expect(at).toBeLessThanOrEqual(mark);
+      expect(at).toBeGreaterThan(mark - 300); // the last line end before the mark
+      expect(b[k].text.endsWith("\n")).toBe(true);
+    });
+    expect(b[3].text.endsWith("</chat>")).toBe(true);
+  });
+  test("cut keeps whole UTF-8 characters", () => {
+    expect(bytes(cut("a".repeat(600)))).toBe(512);
+    expect(cut("é".repeat(300))).toBe("é".repeat(256)); // 512 is a character boundary
+    const split = cut("x" + "é".repeat(300)); // 512 falls inside the 256th é
+    expect([split.includes("�"), bytes(split)]).toEqual([false, 511]);
+    expect(cut("short")).toBe("short");
+  });
+
+  test("one call: flags, env, blocks, trimmed reply, usage hook, and the process is gone afterwards", async () => {
+    const f = fake([{ reply: "  a summary line \n" }]), calls: CallInfo[] = [];
+    const job = msgJob("hi", ["one"]);
+    expect(await makeSummarizer({ onCall: (c) => calls.push(c) })(job)).toBe("a summary line");
+    const [start] = f.starts();
+    expect(start.argv).toEqual(["-p", "--model", "sonnet", "--effort", "medium", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
+      "--include-partial-messages", "--no-session-persistence", "--setting-sources", "", "--strict-mcp-config", "--system-prompt-file", COMPACT_FILE, "--tools", "", "--safe-mode"]);
+    expect(start.env).toEqual({ DISABLE_PROMPT_CACHING: "1", CLAUDE_CODE_PROMPT_CACHE_TTL: "5m" });
+    expect(f.messages()).toEqual([blocks(job)]);
+    expect(calls.map((c) => [c.attempt, c.usage.output_tokens])).toEqual([[1, 5]]);
+    await until(() => !alive(start.pid), 2000);
+  });
+  test("size retries stay in the same process and show the cut; the shortest try wins", async () => {
+    const w = (n: number) => "w".repeat(n), f = fake([{ reply: w(600) }, { reply: w(530) }, { reply: w(400) }]);
+    expect(await makeSummarizer()(msgJob())).toBe(w(400));
+    const sent = f.messages();
+    expect(sent.length).toBe(3);
+    expect(sent[1]).toEqual([{ type: "text", text: `That line is 600 bytes; the limit is 512. It must end where it is cut here:\n${w(512)}| ← LIMIT` }]);
+    expect(sent[2][0].text.startsWith("That line is 530 bytes;")).toBe(true);
+    expect(f.starts().length).toBe(1);
+  });
+  test("after TRIES attempts a stubborn node keeps its shortest try", async () => {
+    const f = fake([540, 530, 520, 525, 515, 100].map((n) => ({ reply: "a".repeat(n) })));
+    expect(bytes(await makeSummarizer()(msgJob()))).toBe(515);
+    expect(f.messages().length).toBe(TRIES);
+  });
+  test("a refusal, an empty reply, an error result, an early exit and an empty retry fail the node", async () => {
+    const fails = async (script: object[], why: RegExp) => { fake(script); await expect(makeSummarizer()(msgJob())).rejects.toThrow(why); };
+    await fails([{ reply: "", stop_reason: "refusal" }], /refused/);
+    await fails([{ reply: "  \n" }], /empty reply/);
+    await fails([{ is_error: true, reply: "API Error: overloaded" }], /overloaded/);
+    await fails([{ exit: 3, stderr: "boom: not logged in" }], /code 3.*boom: not logged in/);
+    await fails([{ reply: "a".repeat(600) }, { reply: "" }], /empty reply/);
+  });
+  test("a call that never answers times out; a missing binary fails the node, not the process", async () => {
+    fake([{ hang: true }]);
+    await expect(makeSummarizer({ timeoutMs: 150 })(msgJob())).rejects.toThrow(/no result after 0.15s/);
+    process.env["OPTCHAT_CLAUDE"] = "/nonexistent/claude";
+    await expect(makeSummarizer()(msgJob())).rejects.toThrow();
+  });
+  test("pump + summarizer: nodes get built and each call sees only the earlier summaries", async () => {
+    const f = fake([{ reply: "summary line" }]), mem = newMem(), reports: string[] = [];
+    const p = createPump({ mem, jobs: 2, commit: (n) => addNode(mem, n), summarize: makeSummarizer(), report: (m) => reports.push(m) });
+    [2000, 2000, 2000].forEach((size, i) => addMessage(mem, user(i, size)));
+    p.pump();
+    await until(() => built(mem, 0, 2) && built(mem, 1, 0), 10_000); // (1,0) is a free merge of two 12-byte summaries
+    p.stop();
+    expect(reports).toEqual([]);
+    expect(f.messages().map((c) => c[0].text).sort()).toEqual(["<chat>\n</chat>", "<chat>\nsummary line\n</chat>", "<chat>\nsummary line\nsummary line\n</chat>"]);
   });
 });

@@ -125,11 +125,13 @@ What Claude Code puts on the wire with a custom system prompt (`*` = cache mark)
 
 ```
 system:   [billing header, not cache-keyed] [*"You are a Claude agent, built on…" (forced with OAuth)] [*<system-prompt-file>]
-messages: user:   [<system-reminder> userEmail] [<system-reminder> git attribution]  [your content blocks…]
+messages: user:   [<system-reminder> userEmail] [<system-reminder> git attribution*]  [your content blocks…]
           system: [*env: cwd, OS, model, today's date]          ← after your content
           step≥2: assistant[* last block], user tool_result[* last block]  ← rolling marks
 tools:    the `--tools` list plus the MCP tools, sorted by name, no marks
 ```
+
+(*) Not sent with `--tools ""` (the compactor); sent when `Bash` is among the tools.
 
 Consequences:
 
@@ -298,7 +300,9 @@ env: DISABLE_PROMPT_CACHING=1  CLAUDE_CODE_PROMPT_CACHE_TTL=5m
 - **Tail:** everything after the last mark. **Layout A** (build this first):
   one block with a 4th mark, containing the rest of the lines plus `</chat>`.
   **[measured]** Each next level-0 call reads through the 100k mark (~34k
-  tokens) and writes ~3.7k: about 10.5k eq per call.
+  tokens) and writes ~3.7k: about 10.5k eq per call. **[step 3]** Confirmed with
+  the real code on a 105k-char chat: the write is the size of the tail piece plus
+  the new line, so it is smaller when the tail is short (§14 S3).
 - **Step block** (no mark): the SCALE text plus the instruction plus the
   message or the two child lines, exactly as gist §4.2.
 - **Layout B** (an optimization; switch to it only after measuring): put each
@@ -319,8 +323,9 @@ follow-up user message with the gist's exact retry text and wait for the next
 
 The reply text is the `result` event's `result` field (or the joined text blocks
 of the last `assistant` event), trimmed. Kill the process when the node is done.
-A refusal, an empty reply or a non-zero exit fails the node and goes into the
-10 s retry loop.
+A refusal, an empty reply, an `is_error` result, a non-zero exit or no `result`
+within `CALL_TIMEOUT` (5 min, so a hung call frees its JOBS slot) fails the node and
+goes into the 10 s retry loop.
 
 **SCALE:** the gist requires "a realistic summary line of exactly 512 bytes".
 Write one by hand into `prompts/scale.txt`: dense, multi-item, tagged
@@ -500,6 +505,15 @@ for leaks. Units: in / read / write = `input_tokens` / `cache_read_input_tokens`
 - Layout A first for the compactor, as planned. Layout B stays optional (§7).
 - The turn code checks `system/init` for the `optchat` MCP server (§13).
 - `dev/wire-proxy.ts` now logs the request on arrival (see §10).
+
+**Step 3 (compactor), measured** with the real `summarize.ts` (sonnet, medium, layout A) through the wire proxy:
+
+| # | Question | Result |
+|---|---|---|
+| S1 | Wire layout of a compactor call | `user[userEmail, 4 context pieces each marked, step]`, `system` and the env message unmarked: pieces 49,809 / 30,012 / 20,129 / 3,368 chars, all four marks ours. No git-attribution reminder with `--tools ""`. |
+| S2 | Usage on a 400-line, 105k-char chat, 4 long messages one after another | Cold: `in=651 read=0 write=39102` (50.3k eq; §7: 37.8k write, 49.7k eq). Then `read=37865` on every call (through the 100k mark) with `write` 1384 / 1546 / 1717 (the tail piece plus the new line): **7.3–7.7k eq per call**. §7's 3.7k write came from a 10.3k-char tail; the write scales with the tail piece. |
+| S3 | Size and quality | 4 of 4 summaries 340–453 bytes, no retries, no refusals; the user's words kept verbatim; 3.1–4.7 s per call. On the real imported notes: 3 merges `ctx 4/36/66 lines`, 425–461 bytes from two ~260-byte notes each, no retries, no refusals; cold writes 1.6k / 4.7k / 7.7k tokens (the context differs every time, so nothing is read). |
+| S4 | The imported tree | 128 notes give 255 nodes; 173 are free (128 level-0 plus 45 merges), 82 need the model (19 level-1 merges are ready, the rest unlock level by level). Not run in full: it costs ~82 calls. |
 
 **Scheduled measurements** (approved; each at its step, results go into this section):
 
