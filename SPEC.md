@@ -46,8 +46,8 @@ prefer the hand-written loop, it is about 60 lines.
 
 ```
 ~/.claude/optchat/           this repo (code)
-  SPEC.md  docs/  dev/wire-proxy.ts
-  src/*.ts  prompts/{master,view_doc,compact,subagent?}.txt
+  SPEC.md  docs/  dev/{wire-proxy,wire}.ts
+  src/*.ts (map in §16.2)  src/fixtures/*.jsonl  prompts/{master,view_doc,compact}.txt  prompts/scale.txt
 
 ~/.optchat/                  data dir ($OPTCHAT_DIR overrides), its own git repo
   chat/main/YYYY-MM-DD.jsonl
@@ -100,6 +100,32 @@ must-haves:
 
 Write the tree/view logic as **pure functions** over in-memory arrays, so
 `src/selfcheck.test.ts` can drive them with a fake compactor. See §10.
+
+**As built** (decisions the code made; the tests pin them):
+
+- Free nodes are written to `chat/tree` like any other node, so readers and the MCP
+  server need no free-node logic. `buildFree` builds them (bottom-up, no JOBS slot,
+  no rule 3) at pump start, after every commit and inside `import-optmem`.
+- `loadChat` reads every day file, sorts the messages by id and **throws** unless the
+  ids are 0, 1, 2, …; for tree nodes the first record wins and `size` is recomputed
+  from the text. Only the lock holder repairs files. `view`, `browse` and the MCP
+  server pass `repair: false` and stay quiet about an unterminated last line (a
+  reader can't tell a torn line from a write in progress). `view: false` skips the
+  fold (the MCP server does).
+- View size = the sum of the node text bytes (no `id+n|` prefix). Ties in `due` go to
+  the leftmost pair. `refold` uses `T = i+1` at each step with the *final* tree, so it
+  equals the live fold only when the compactor kept up (the selfcheck asserts that case).
+- Dates: `date` is ISO UTC; a message's file is its local day; `localTime()` formats
+  `YYYY-MM-DD HH:MM` local (what `date(id)` returns).
+- The pump builds a job's context snapshot synchronously when it decides to start the
+  node, so a job sees exactly the state rule 3 checked; `context()` throws if it meets
+  an unbuilt line (a rule-3 bug must be loud). `stop()` ignores later completions and
+  clears the retry timers. Every pass scans all nodes (O(T)); a per-level cursor is the
+  upgrade path past ~1e5 messages.
+- The lock is a unix socket, `unref`'d so it doesn't keep the process alive. Two
+  processes taking over one stale socket in the same instant can both win (accepted).
+  Socket paths are limited to ~107 characters: keep data dirs short in tests and
+  scratch work.
 
 ## 4. Claude Code invocation: common facts [measured]
 
@@ -214,6 +240,18 @@ next loop iteration then gives it a fresh call with a new view.
 User cancel during a turn (Ctrl-C): kill the child. Messages in `sent` that
 weren't replayed are logged as `user`, unanswered (gist §7 "nothing is lost").
 
+**As built** (`createSession` in `turn.ts`): `input(text)` writes to the running
+call's stdin if there is one, otherwise it joins the queue and starts a turn.
+Messages that arrive before the turn takes the queue (while it waits in `settle`,
+later also in priming) join the same call: logged one by one, sent joined with a
+blank line. `cancel()` aborts the wait and kills the call. Untaken mid-run messages
+are requeued **only if the call ended with a `result`**; after a cancel or a crash
+they are logged as unanswered `user` messages (requeueing after a crash would loop
+forever). A crash, a failed spawn, an `is_error` result and a refusal are printed
+with `out.info`, never retried; the user's message is already in the log. After each
+call a dim usage line is printed from `result.usage`. The session takes an `Out`
+(`{text, thinking, info}`); the REPL provides it.
+
 ### 5.3 Event → log mapping
 
 Use `--replay-user-messages`. Event order per step: `stream_event
@@ -241,6 +279,13 @@ compactor's input.
 
 Log each entry right when its event arrives, in stream order. After each log,
 call `pump()` (gist §7).
+
+As built: empty or whitespace text blocks are not logged; the parts of a tool result
+are joined with `\n` and parts that are not text become `[type]`; each tool call and
+result also prints one clipped line (`→ …`, `← …`); the `system/init` event is
+checked and a warning printed if `optchat` is not a connected MCP server (§13).
+`--include-partial-messages` is on for the master (live text) and, being a shared
+flag, for the compactor too (unused there).
 
 ## 6. Priming (new; not in the gist)
 
@@ -368,6 +413,15 @@ The `--mcp-config` JSON is generated once at startup and must be
 byte-identical for priming and real calls, because it is part of the cached
 tool list.
 
+As built: `zoom` of an unbuilt node answers like an invalid one (`No line id+n.`),
+but `zoom(id, 1)` works for any existing message, because the view's placeholder
+tells the model to zoom it. `date` of an invalid id answers `No message N.`. The
+server speaks `initialize` (echoing the client's protocol version), `ping`,
+`tools/list` and `tools/call`, answers unknown methods with `-32601` and tool
+errors with `isError`. The tool input schemas have no property descriptions. The
+data dir reaches the server as `OPTCHAT_DIR` in the config entry; the config is an
+inline JSON string built once (`mcpConfig(dir)`) that launches `bun src/cli.ts mcp`.
+
 ## 10. CLI, import, browse, checks
 
 - `optchat`: take the lock, load, fold the view, start the pump, **print the
@@ -392,6 +446,13 @@ tool list.
   `n` as message `i = n`, kind `note`, text trimmed, date = that day at
   **12:00 local time** (a fixed time, so imported times are recognizably
   synthetic). Refuse if the ids aren't contiguous from 0.
+- As built: `view`, `browse` and `mcp` never write (`repair: false`). `browse`
+  writes `./optchat.html` unless given a path. `import-optmem` parses the whole
+  file before writing anything (a bad file writes nothing), refuses a non-empty
+  chat, takes the lock, and builds the free nodes so the chat is readable at once.
+  The real `LOG.txt` has 128 notes (2026-08-08 … 2026-10-04, 32 days, 123–280
+  bytes each, ids contiguous from 0, 24 with non-ASCII text, so the padding is by
+  bytes): 255 nodes, 173 free, 82 need the model.
 - `src/selfcheck.test.ts` (`bun test`), with no model calls:
   - tree addressing, free nodes;
   - pump rule-3 ordering with a fake async compactor;
@@ -401,14 +462,17 @@ tool list.
   - `cap()`;
   - SCALE is 512 bytes;
   - the view-block split points;
-  - the event→log mapping against a recorded stream-json fixture.
+  - the event→log mapping against a recorded stream-json fixture;
+  - the compactor calls and the whole turn against a fake `claude`
+    (`src/fake-claude.ts`, §16.4), and the MCP server over stdio.
 - `dev/wire-proxy.ts`: a logging pass-through for `ANTHROPIC_BASE_URL`. It
   records only payload structure (block lengths, hashes, cache marks) and
   usage, never headers: a `req` record when the request arrives (so a killed
   priming request still leaves its shape) and a `res` record with status and
   usage when the response ends (late for killed requests, see §13). Use it in
-  Phase 0 and to check cache behavior later. Logs can contain short text heads:
-  keep them out of git (`.gitignore` covers its default output).
+  Phase 0 and to check cache behavior later; `bun dev/wire.ts <log>` prints it
+  readably. Logs can contain short text heads: keep them out of git (`.gitignore`
+  covers its default output).
 
 ## 11. Deviations from the gist (keep this list current)
 
@@ -434,19 +498,23 @@ gives.
    It settled the three **[verify]** items (`--safe-mode` vs MCP,
    `DISABLE_PROMPT_CACHING` on opus, layout B's per-line blocks) and found the
    permission-mode gap (§4). Nothing breaks the design; the plan below stands.
-1. `store`, `tree`, `view` plus `selfcheck` (pure; fake compactor).
-2. `import-optmem`, `view`, `browse`. Import the 116 notes into a scratch data
-   dir and inspect them.
+1. `store`, `tree`, `view` plus `selfcheck` (pure; fake compactor). **Done** (0045b07).
+2. `import-optmem`, `view`, `browse`. Import the notes into a scratch data dir and
+   inspect them. **Done** (37546fa; the log has 128 notes now, not 116).
 3. `compactor` with real `claude -p` calls on the imported notes. Check the
    per-call usage against §7's numbers through the stream-json `result` usage
-   fields (`cache_read_input_tokens`, `cache_creation_input_tokens`).
+   fields (`cache_read_input_tokens`, `cache_creation_input_tokens`). **Done**
+   (d74a2a2, §14 S1–S4).
 4. `mcp` (zoom/date), then `turn` without priming. End-to-end on a scratch data
-   dir. Also record how thinking blocks appear in stream-json (§14).
+   dir. Also record how thinking blocks appear in stream-json (§14). **Done**
+   (269d2cf, §14 T1–T3). **Stop here: §16 is the handover; wait for the user's
+   go-ahead before step 5.**
 5. `prime`. Confirm with the wire proxy or the `result` usage that step 1 reads
    the view (read ≈ view tokens, write ≈ new message + env). Measure it at full
    scale on opus against the no-priming baseline, and the billing of a killed
-   priming request (§14).
-6. REPL polish, git commit per turn, mid-run messages, Ctrl-C paths.
+   priming request (§14). Detailed plan: §16.6.
+6. REPL polish, git commit per turn, mid-run messages, Ctrl-C paths. Detailed
+   plan: §16.7.
 
 Each step ends with `bun test` green. No step introduces new dependencies.
 
@@ -469,12 +537,30 @@ Each step ends with `bun test` green. No step introduces new dependencies.
   without zoom/date and nothing would fail (§14 P1). The turn's `system/init`
   event lists the MCP servers with their status; check that `optchat` is
   `connected` and warn if not.
+- Claude Code 2.1.289 CLI facts (from `claude --help` and the request dumps):
+  `--system-prompt-file` is not listed by `--help` but works (every run uses it);
+  `--effort` takes low|medium|high|xhigh|max; `--permission-mode` takes
+  acceptEdits|auto|bypassPermissions|manual|dontAsk|plan; `--tools ""` disables every
+  built-in tool; `--mcp-config` is variadic (it takes JSON strings or files up to the
+  next flag). The master request also carries `max_tokens: 128000`,
+  `output_config: {effort}`, `thinking: {type: adaptive, display: updates}` and
+  `context_management: {edits: [clear_thinking_20251015, keep: all]}`; the effort and
+  thinking settings are part of the request, so priming must use the same ones (it does:
+  one `masterArgs()`).
+- Starting the REPL on a freshly imported chat starts the pump on the whole tree: for
+  the 128 real notes that is 82 sonnet calls (3–5 s each, JOBS at a time), a one-off
+  cost of a few hundred thousand eq. Tell the user before the first run.
+- The master's working directory is the harness's cwd. It shows in the env block
+  after the view, so it never touches the cached prefix, and the CLAUDE.md files and
+  auto-memory of that directory don't reach the request (§14 P2).
 - The model alias `opus` resolves to `claude-opus-5-5` today (`sonnet` to
   `claude-sonnet-5-5`). An alias change invalidates every cache entry once.
 
-## 14. Phase 0 findings (2026-10-04, Claude Code 2.1.289)
+## 14. Measured findings (2026-10-04, Claude Code 2.1.289)
 
-**Method.** `dev/wire-proxy.ts` as `ANTHROPIC_BASE_URL` (OAuth works through it),
+Phase 0 (P1–P8), then step 3 (S1–S4) and step 4 (T1–T3); the scheduled ones come last.
+
+**Method (Phase 0).** `dev/wire-proxy.ts` as `ANTHROPIC_BASE_URL` (OAuth works through it),
 scrubbed child env (HOME, PATH and a few basics, so no inherited `CLAUDE_CODE_*`),
 tiny prompts, a stub stdio MCP server with the final tool shapes, throwaway driver
 scripts and logs outside the repo. The test account's real config has hooks
@@ -535,3 +621,222 @@ for leaks. Units: in / read / write = `input_tokens` / `cache_read_input_tokens`
   one. If that is inconclusive, say so; the §6 assumption (billed in full) stays.
 - Not needed: the meaning of `queued_turn_count` (the harness kills at the first
   `result`).
+
+## 15. Working agreement
+
+The rules this build runs under. They come from the user, through the orchestrating
+session `claude-e6` (Herdr pane `wR:p1`); the build session is `optchat-impl` (pane `wR:pK`).
+
+- **Stack and style:** Bun + TypeScript, no new dependencies (Bun built-ins and `node:`
+  only). KISS, no abstraction the spec doesn't need, code that reads like its neighbours
+  (2 spaces, double quotes, terse comments; a `ponytail:` comment marks a deliberate
+  shortcut with its ceiling and upgrade path).
+- **Process:** follow §12 strictly. `bun test` green at the end of each step. A
+  conventional commit (or a few) per completed step; stage files by path, never
+  `git add -A` over scratch output. The first commit was the pre-existing
+  SPEC/docs/dev files. No attribution trailer is configured.
+- **Reporting:** a short status after Phase 0 and after each build step: what works,
+  measured usage where relevant, open issues. Send it with `SendMessage` to `claude-e6`
+  (find the orchestrator with `herdr pane get wR:p1` and `ListAgents`) while work goes
+  on. A final answer is delivered automatically, so don't send a separate completion
+  message. A finding that breaks the design stops the work and goes into the report.
+- **Gate:** after step 4 the user asked for the handover (§16) and for work to wait until
+  told to go on with step 5. They may `/compact` first.
+- **Subscription:** use it sparingly. Keep model calls in tests tiny (the fake `claude`
+  exists for that). Scratch data dirs only (`OPTCHAT_DIR` with a short path), never
+  `~/.optchat`. Never commit proxy logs, request dumps or stream taps (they hold the
+  userEmail reminder or a chat). Never edit or delete anything under `~/.optmem`: read
+  `LOG.txt` only (the user's own OptMem tool updates it, so its mtime moves by itself).
+- **Decisions already taken by the user:** D9 (bypassPermissions default); the
+  measurements scheduled in §14; bracketed paste in the REPL (§10).
+- **Environment traps:** the user's damage-control hook blocks a Bash command whose text
+  contains `process.env.<NAME>` (it reads it as a `.env.<name>` file): write such code
+  with the Edit/Write tools, not a heredoc. `rm -rf` asks for confirmation: reuse
+  scratch dirs or take fresh names; tests delete only their own temp dirs, from inside
+  bun. `pkill -f <pattern>` kills your own shell when the pattern is in its command
+  line: kill by PID (`ss -ltnp | grep :8399`). This machine's shell and Claude Code
+  sessions export `CLAUDE_CODE_*`, `HERDR_*` and plugin dirs: measure with a scrubbed
+  environment (§16.5).
+
+## 16. State of the build and how to continue
+
+Written at the end of step 4, so that a fresh session (or one after `/compact`) can go
+on from this file and `git log` alone.
+
+### 16.0 Start here
+
+1. Read this file fully, then `docs/optchat-gist.md` (the base spec; this file lists every
+   deviation from it).
+2. `git log --oneline` and `bun test` (expect 58 passing).
+3. Do not start step 5 until the user says so (§15, Gate).
+4. If something blocks, ask the orchestrator (`claude-e6`) with `SendMessage`.
+
+### 16.1 Status
+
+| step | commits | state |
+|---|---|---|
+| Phase 0 | 3e66030, c6274af | done, §14 P1–P8 |
+| 1 store, tree, view, pump | 0045b07 | done |
+| 2 import-optmem, view, browse | 37546fa | done |
+| 3 compactor calls | d74a2a2 | done, §14 S1–S4 |
+| 4 mcp, turn without priming | 269d2cf | done, §14 T1–T3 |
+| 5 prime | – | **waiting for the user's go-ahead** (§16.6) |
+| 6 REPL polish | – | open (§16.7) |
+
+`bun test`: 58 tests in one file, ~1.1 s, no model calls. Commits 84bc1b5 and the
+handover commit only touch SPEC.md (and add `dev/wire.ts`). The REPL does not exist
+yet: `optchat` without a command prints the usage.
+
+### 16.2 Code map (`src/`)
+
+| file | what it holds |
+|---|---|
+| `config.ts` | constants (gist §1, SPEC §2, `CALL_TIMEOUT`); env overrides `OPTCHAT_MODEL`, `OPTCHAT_PERMISSION_MODE`, `OPTCHAT_DIR` |
+| `tree.ts` | types `Msg`/`Node`/`Coord`/`Mem`; `id+n` addressing (`span`, `label`, `coords`); `freeText`, `ready`; `built`/`getNode`/`setNode` (first write wins); `dayOf`, `localTime` |
+| `view.ts` | `fit`, `addMessage`/`addNode`, `refold`, `render`, `cutBlocks`, `allBuilt`, `first`, `context`, `settle`, `PLACEHOLDER`, `flat` |
+| `store.ts` | JSONL append (write + fsync), `loadChat`, `newMsg`, `committer` (persist + `addNode`), `acquireLock` |
+| `compactor.ts` | the pump: `createPump`, `buildFree`, `makeJob`, the `Job`/`Summarize` types |
+| `summarize.ts` | the real `Summarize`: layout A `blocks()`, retries, `cut()`, `SCALE`, `COMPACT_FILE`, `onCall` usage hook |
+| `claude.ts` | `spawnClaude` (`send`, `next`, `result`, `kill`, `stderr`, optional `tap`), `baseArgs` |
+| `chat.ts` | `openChat`: lock + `loadChat` + pump + `log()` |
+| `turn.ts` | `writeSystemPrompt`, `mcpConfig`, `masterArgs`, `cap`, `createMapper`, `createSession` |
+| `mcp.ts` | `TOOLS`, `zoom`, `date`, `serveMcp` |
+| `import.ts`, `browse.ts` | `parseOptmem`/`importOptmem`; `browseHtml` |
+| `cli.ts` | `view`, `browse`, `import-optmem`, `mcp` (the REPL is missing) |
+| `fake-claude.ts` | test double for `claude -p` (format in its header) |
+| `selfcheck.test.ts` | every test |
+| `fixtures/` | `turn-tools.jsonl`, `turn-thinking.jsonl`: real master streams, sanitized |
+
+`prompts/`: `compact.txt` (gist §4.4 verbatim), `scale.txt` (512 bytes), `master.txt`,
+`view_doc.txt`; the selfcheck re-derives each from the gist. `dev/`: `wire-proxy.ts`, `wire.ts`.
+
+### 16.3 Running things
+
+```
+bun test
+OPTCHAT_DIR=<short scratch dir> bun src/cli.ts import-optmem    # real LOG.txt, read only
+OPTCHAT_DIR=<dir> bun src/cli.ts view                           # what the model sees
+OPTCHAT_DIR=<dir> bun src/cli.ts browse out.html
+```
+
+### 16.4 Test rig
+
+- One file, `src/selfcheck.test.ts`, helpers on top (`tmp`, `until`, `fake`, …). `bun test`
+  runs in UTC but a child process uses the system zone: pass `TZ` explicitly when a test
+  compares local times across processes.
+- `src/fake-claude.ts` stands in for `claude`: the code under test spawns the binary
+  named by `OPTCHAT_CLAUDE` (read at spawn time, so a test may set it late).
+  `FAKE_CLAUDE_SCRIPT` and `FAKE_CLAUDE_LOG` and the script format are in the file's
+  header (steps per message or per process, raw `events` with `$wait`/`$replay`/`$hang`,
+  `exit`, `hang`). Pass a custom `summarize` to `openChat` when a test must not spawn
+  compactor calls.
+- `src/fixtures/*.jsonl` are real master streams (a turn with MCP and Bash; a thinking
+  block). To record one: `createSession({ …, tap: file })` or `spawnClaude(args, env,
+  tap)` writes every raw stdout line; replace the `system/init` paths and plugin lists
+  and anything personal before committing.
+- Mutation checks (copy `src`, `prompts`, `docs` to a scratch dir, break one rule,
+  expect a failure) were done after steps 1, 3 and 4 and every mutant was caught.
+  They are manual.
+
+### 16.5 Measurement recipe (the scripts used so far were scratch files, not in git)
+
+- Proxy: `LOG=<f>.jsonl PORT=8399 SYSDIR=<dir> bun dev/wire-proxy.ts &`, outside the
+  repo; stop it by PID. It binds **all interfaces** (Bun's default): run it only while
+  measuring, and add `hostname: "127.0.0.1"` to its `Bun.serve` when you next touch it.
+  Read it with `bun dev/wire.ts <f>.jsonl [last N]`. SYSDIR dumps full request bodies
+  minus long text and contain the userEmail reminder.
+- Children go through it with `ANTHROPIC_BASE_URL=http://127.0.0.1:8399` (OAuth works
+  through it) and a scrubbed environment:
+  `env -i HOME="$HOME" PATH="$PATH" ANTHROPIC_BASE_URL=… bun script.ts`.
+- The e2e pattern (a scratch script): seed a chat with `appendMessage` + `newMsg`,
+  `openChat(dir, { summarize })`, `createSession({ chat, out, system:
+  writeSystemPrompt(dir), mcp: mcpConfig(dir), tap })`, `session.input(text)`,
+  `await session.whenIdle()`; print the new messages, the `info` lines (usage per call)
+  and the proxy records. Seed notes with distinct local times so `date` is checkable.
+- Usage numbers: `result.usage` (aggregated over a call's requests), the `message_start`
+  event (also for killed requests), or the proxy `res` record. "eq" = in + 0.1·read +
+  1.25·write + 5·out.
+- Subscription used so far, roughly: Phase 0 about 50 requests (nine on opus at 12–24k
+  tokens, the rest small); step 3 eight sonnet calls (the largest a cold 39k-token
+  write); step 4 about a dozen opus requests of 5–7k tokens and three thinking probes.
+  A few hundred thousand eq in all. Step 5 will cost the most: a ~128 KB view is ~40k
+  tokens, and the baseline and primed runs each write it once.
+
+### 16.6 Step 5 (prime), in detail
+
+1. `src/prime.ts` per §6. One `masterArgs(system, mcp)` for both calls; the priming spawn
+   adds `DISABLE_PROMPT_CACHING=1`. Message = every view block (`cutBlocks(render(mem))`,
+   up to 4) with `cache_control: {type: "ephemeral"}`, then a text block `ok`. Kill at the
+   first `stream_event` of type `message_start` (it already carries the final input
+   usage). Remember `{view, at}`; skip when the same view was primed less than
+   `PRIME_MAX_AGE` ago; on failure print once and go on.
+2. Hook in `turn()` (turn.ts): between `render` and `queue.splice(0)`, `await prime(view)`.
+   A cancel during the wait acts like a cancel in `settle` (log the queued messages as
+   `user`, break). Messages that arrive during priming join the same call. The blocks
+   passed to `ask()` must be the strings that were primed.
+3. Idle priming (§6): when the view is fully built and no call or turn runs, prime after
+   a ~1 s debounce. `mem.waiters` is called on every `fit()`, so a persistent listener
+   there can schedule it (never remove it).
+4. Tests with the fake `claude`: argv equals `masterArgs`, the 4 marks, `ok` last, killed
+   at `message_start` (a raw `stream_event` step), skipped when fresh, a failure doesn't
+   stop the turn, cancel during priming.
+5. Measure at full scale on opus (approved): a synthetic chat with a ~128 KB view
+   (~480 notes of ~270 bytes; each ≤ 506 bytes, so level-0 nodes are free; give
+   `openChat` `summarize: () => new Promise(() => {})` so the pump never calls a model for
+   the ~240 merges that aren't free). Report `in/read/write` per request for a
+   no-priming baseline turn, a cold primed turn and a primed turn after a tail change.
+   Keep it to a handful of opus requests.
+6. Billing of a killed priming request: make `dev/wire-proxy.ts` log **only** the
+   `anthropic-ratelimit-*` response headers (in the `res` record; never auth or any other
+   header) and compare the utilization change of a killed request with a completed one.
+   `rate_limit_event` utilization has 0.01 resolution (§14 T3), so unless the headers
+   are finer the answer is "inconclusive": say so, don't speculate. Keep repetitions
+   cheap and stop if the first pairs show no movement.
+7. Put the numbers into §6 and §14, commit, report, then step 6.
+
+### 16.7 Step 6 (REPL), in detail
+
+- `src/cli.ts` with no command: `openChat(DIR)` (the lock; a second process exits with
+  `acquireLock`'s message), print the `problems` of the load, print the view (`render`),
+  then read input. `createSession({ chat, out, system: writeSystemPrompt(DIR), mcp:
+  mcpConfig(DIR) })` already does the rest: the `waiting for N summaries…` line, the
+  queue, mid-run delivery, cancel.
+- `Out` for the terminal: `text` raw; `thinking` dim (`ESC[2m … ESC[0m`); `info` on its
+  own dim line, with a newline first if the cursor is mid-line. No cursor movement, no
+  redraws (the scrollback must work).
+- Input: bracketed paste per §10 (raw mode; `ESC[200~`…`ESC[201~` is one message with
+  its newlines; Enter sends; minimal editing: printable characters, Backspace, Ctrl-U,
+  Ctrl-D on an empty line exits; echo it yourself). Not a TTY: one message per line.
+  Restore the terminal (`ESC[?2004l`, raw mode off) on every exit path, also on
+  Ctrl-Z and on uncaught errors.
+- Ctrl-C: `session.cancel()` if a turn runs or waits; a second Ctrl-C while idle exits
+  (`chat.close()` stops the pump and releases the lock).
+- Git commit of the data dir after every turn (§5.2): `git init` if missing, a
+  `.gitignore` with `lock`, `git add -A` and commit in the DATA dir only, and never fail
+  the turn on a git error (print it). Call it when `whenIdle()` resolves or from the
+  session after `ask()`.
+- `instructions.md` in the data dir is already read by `writeSystemPrompt`. The master's
+  cwd is the REPL's cwd.
+- Confirm with the real thing (so far only the fake `claude` and the Phase 0 probe cover
+  it): a mid-run message taken at a tool boundary and its replay event, one that arrives
+  during the final text step, Ctrl-C during a tool, a long tool loop (output over the
+  30k cap), a multi-line paste.
+- Install hint for the user: `ln -s ~/.claude/optchat/src/cli.ts ~/bin/optchat` (the file
+  is executable and starts with `#!/usr/bin/env bun`). Tell them about the first-run cost
+  of compacting an imported chat (§13).
+
+### 16.8 Open points and risks
+
+- `bypassPermissions` gives the master unrestricted Bash/Edit/Write (D9, approved).
+- The pump's O(T) scan and the MCP server's reload per call are fine for thousands of
+  messages, not for 1e5+ (`ponytail:` comments mark both).
+- Layout B for the compactor is unbuilt and only pays while consecutive calls add ≤ ~20
+  lines (§7).
+- The master has a 1M-token context window, so no autocompact inside a turn is expected.
+  Very long tool loops are unmeasured.
+- Claude Code upgrades change the request and invalidate the cache once. Phase 0 was done
+  on 2.1.289: re-check §14 P1–P3 (no leaks without `--safe-mode`, a stable prefix) after
+  an upgrade, because a leak would silently break the prefix.
+- Real views have never been refused by the safety classifier (§13): every real call in
+  steps 3 and 4 passed. Synthetic word-salad views were refused 3 times in 10.
+- The model may think or not (T1); thinking text is not available, only its size.
