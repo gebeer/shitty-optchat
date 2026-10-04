@@ -34,7 +34,8 @@ optchat (harness, plain terminal REPL)
 ├─ compactor  pump (rule 3), JOBS=8 `claude -p` processes, size retries
 ├─ turn       priming call + one `claude -p` per turn, stream-json in/out, logging
 ├─ mcp        `optchat mcp`: read-only stdio MCP server with zoom/date
-└─ cli        REPL, `browse` (HTML export), `import-optmem`, `view`
+├─ persist    git commit of the data dir after each turn
+└─ cli        REPL (repl.ts), `browse` (HTML export), `import-optmem`, `view`
 ```
 
 No other runtime dependencies. Use only Bun built-ins and `node:` modules.
@@ -474,6 +475,47 @@ inline JSON string built once (`mcpConfig(dir)`) that launches `bun src/cli.ts m
   - While a turn runs, typed messages become mid-run messages (§5.2).
   - While waiting in `settle`, show `waiting for N summaries…`.
   - Ctrl-C cancels the current wait or turn; a second Ctrl-C while idle exits.
+  - **As built** (`repl.ts`, `persist.ts`; `cli.ts` calls `repl(DIR)` when there is no command).
+    Start: lock (a second process exits 1 with `optchat: another optchat is already running
+    on <dir>`), the reaper of §5.2 armed, the load `problems` on stderr, the view, one dim
+    line (`optchat: N messages in DIR, master M[, K view lines still to summarize];
+    Ctrl-C cancels, Ctrl-D exits`) and the prompt `> `.
+    - *Keys* (TTY, raw mode, bracketed paste; `createKeys`, a parser that copes with
+      chunks cut anywhere): printable text, Enter sends, Backspace, Ctrl-U clears, Ctrl-D
+      on an empty line exits, Ctrl-C, Ctrl-Z; arrows and every other sequence are dropped.
+      A paste is one message with its newlines (CR and CRLF become LF; a pasted newline
+      can't be backspaced). The message is trimmed. Stdin not a TTY: one message per line,
+      echoed as `> text`, no prompt; at the end of the input the turn is finished and the
+      process exits. Lines that arrive during a turn are mid-run messages. Dim lines use
+      colour only when stdout is a terminal.
+    - *Screen*: only `text` (raw), `thinking` and `info` (dim lines) are written, plus `\r`
+      and erase-line on the input line itself; no other cursor movement. Output that
+      arrives while you type (a tool line, a compactor report) erases the input line,
+      prints, and brings `> what you typed` back below the next finished line. A prompt is
+      drawn only when idle (or when text is pending). Known limits: only the last row of
+      a wrapped or pasted input is erased; wide characters back up one column. Control
+      characters other than `\n` and `\t` (and C1) are stripped from model and tool text,
+      so a fetched page or a `cat` can't drive the terminal (ESC, OSC 52, …).
+    - *Ctrl-C*: a running or waiting turn is cancelled (`cancelled (Ctrl-C again
+      exits)`); idle, the typed line is dropped and a hint is printed. A second Ctrl-C with
+      no other key in between exits: `session.stop()`, wait for the turn loop (so the
+      messages the call never took are logged), `chat.close()`, a last commit, exit 0.
+      Ctrl-D exits the same way.
+    - *Ctrl-Z*: the terminal is given back, the whole job is stopped with `SIGTSTP` to the
+      process group (the `claude` children stop with it), and after `fg` the terminal is
+      taken again with the typed text still there.
+    - *Exit paths*: bracketed paste off, raw mode off, a newline if the cursor is
+      mid-line, and the system-prompt temp dir removed, on a normal exit, a signal
+      (`reapChildren` turns SIGINT/SIGTERM/SIGHUP into `process.exit(128+n)`) and an
+      uncaught error. The directory goes first and the terminal writes are guarded: with
+      the terminal already gone (SIGHUP when a window closes) a write throws.
+    - *Git*: after every turn loop (`onIdle`) and at exit, the DATA dir is committed
+      (`persist.ts`): `git init -q` when `DIR/.git` is missing (even inside another repo,
+      so `add -A` never reaches it), a `.gitignore` with `lock` when missing, `add -A`, a
+      commit only if something is staged, message `chore(chat): N messages`, author
+      `optchat <optchat@localhost>` and signing off through `-c` (it must work on a bare
+      machine and never wait for a passphrase). One git at a time; an error is printed
+      once per distinct text and never fails a turn.
 - `optchat view`: print the current view (read-only, no lock).
 - `optchat browse [out.html]`: one self-contained HTML page with the view,
   ROOT and each tree level, each entry with its range, time span and size
@@ -493,8 +535,8 @@ inline JSON string built once (`mcpConfig(dir)`) that launches `bun src/cli.ts m
   bytes): 255 nodes, 173 free, 82 need the model.
 - `src/selfcheck.test.ts` (`bun test`): **few tests, only for real failure scenarios; no
   per-function suites; no mutation runs** (breaking code on purpose to test the tests).
-  No model calls. 16 tests, about 360 lines, ~1.1 s (it had 58, and 64 after step 5; the
-  user asked for a lean suite). What is covered:
+  No model calls. 17 tests, about 380 lines, ~1.1 s (it had 58, and 64 after step 5; the
+  user asked for a lean suite; step 6 added one test). What is covered:
   - view and pump: the view-block cut points; the fit invariants over 1200 random
     messages (tiles `[0,T)`, under budget once parents exist, never splits, refold equals
     the live fold); pump rule 3 (messages in order, merges alongside, at most `JOBS`);
@@ -506,12 +548,17 @@ inline JSON string built once (`mcpConfig(dir)`) that launches `bun src/cli.ts m
   - priming: the flags and blocks equal the turn's, the background priming runs once; a
     failing priming is reported once; a cancel during priming;
   - children: a harness that exits, is terminated or is killed leaves no `claude` behind;
-    every test reaps its children and no fake survives the run (§16.4).
+    every test reaps its children and no fake survives the run (§16.4);
+  - the terminal input: a bracketed paste is ONE message wherever the terminal cuts its
+    chunks (inside a marker, between CR and LF), and Enter outside a paste sends (the one
+    test step 6 added: line-based reading of a paste is the failure the REPL exists to avoid).
 
   Left untested on purpose, because they restated the code or were low risk: exact flags
   and prompt files, the tool descriptions, the MCP protocol, the CLI end to end, `browse`,
-  per-error-type matrices, `cap()`. Add a test only for a failure that has happened or
-  plausibly will, and don't let the suite grow back.
+  per-error-type matrices, `cap()`; and, because they need a terminal, the REPL's screen
+  handling, Ctrl-C, Ctrl-Z, signals and `persist.ts`: those were checked by hand in a pty
+  (§14 R7) and with the real `claude` (§14 R1–R6). Add a test only for a failure that has
+  happened or plausibly will, and don't let the suite grow back.
 - `dev/wire-proxy.ts`: a logging pass-through for `ANTHROPIC_BASE_URL`, loopback only.
   It records only payload structure (block lengths, hashes, cache marks), usage and
   the `anthropic-ratelimit-*` response headers; **no other header is ever logged**
@@ -565,8 +612,8 @@ gives.
    scale on opus against the no-priming baseline, and the billing of a killed
    priming request (§14). **Done** (§6 as built, §14 F1–F6). Again the handover (§16)
    and then a wait for the user's go-ahead before step 6.
-6. REPL polish, git commit per turn, mid-run messages, Ctrl-C paths. Detailed
-   plan: §16.7.
+6. REPL polish, git commit per turn, mid-run messages, Ctrl-C paths. **Done**
+   (§10 as built, §14 R1–R7, §16.7). Again the handover (§16); the build order ends here.
 
 Each step ends with `bun test` green. No step introduces new dependencies.
 
@@ -607,10 +654,31 @@ Each step ends with `bun test` green. No step introduces new dependencies.
   auto-memory of that directory don't reach the request (§14 P2).
 - The model alias `opus` resolves to `claude-opus-5-5` today (`sonnet` to
   `claude-sonnet-5-5`). An alias change invalidates every cache entry once.
+- Claude Code behaviour met in step 6 (`-p`, bypassPermissions, §14 R1–R6):
+  - A foreground `sleep N` of a minute or two is refused ("foreground sleeps are
+    blocked"): the model runs it in the background and the turn ends at once (`sleep 12`
+    stayed in the foreground; a `python3 -c` sleep of 117 s did too).
+  - A background Bash task dies with its call: the harness kills `claude` at the end of
+    the turn and the task goes with it. Nothing can keep running across turns.
+  - Bash output over ~30 KB becomes a `<persisted-output> Output too large (42.9KB).
+    Full output saved to: ~/.claude/projects/<cwd slug>/<session>/tool-results/…` notice
+    plus a ~2 KB preview: that notice (~2.3 KB) is what the `echo` entry holds and what the
+    model sees; the file is Claude Code's, subject to its own clean-up. `Read` output is
+    cut near 30,000 chars, and `cap()` trims the small overshoot. So `CAP` rarely acts.
+  - SIGTERM to a `claude -p` while its Bash tool runs: the tool's process is killed (exit
+    137; the `tool_result` still arrives and is logged) and `claude` exits within ~1 s.
+    No orphan is left.
+- Bun in a terminal: `setRawMode(true)` keeps output post-processing (`\n` is CRLF) and
+  turns off ICRNL, ISIG, ICANON and ECHO (Enter is `\r`; Ctrl-C and Ctrl-Z are the bytes
+  0x03 and 0x1a, no signal). Bun restores the terminal modes at exit, not bracketed paste.
+  The `exit` event also fires after an uncaught error. `process.kill(0, "SIGTSTP")` stops
+  the whole job and returns after the shell's `fg` (the shell leaves the terminal cooked:
+  set raw mode again). A closed terminal gives SIGHUP, and every write to it then throws:
+  an exit handler must do its clean-up before, or without, writing.
 
 ## 14. Measured findings (2026-10-04, Claude Code 2.1.289)
 
-Phase 0 (P1–P8), then step 3 (S1–S4), step 4 (T1–T3) and step 5 (F1–F6); the scheduled ones come last.
+Phase 0 (P1–P8), then step 3 (S1–S4), step 4 (T1–T3), step 5 (F1–F6) and step 6 (R1–R7); the scheduled ones come last.
 
 **Method (Phase 0).** `dev/wire-proxy.ts` as `ANTHROPIC_BASE_URL` (OAuth works through it),
 scrubbed child env (HOME, PATH and a few basics, so no inherited `CLAUDE_CODE_*`),
@@ -681,9 +749,29 @@ Cost of step 5's real calls: about 540k eq (the billing pairs ~250k, the baselin
 runs ~215k, the idle check ~40k, a warm-up and a stray haiku probe ~35k), roughly +3 points of
 the 5-hour utilization (0.07 → 0.10, other sessions included).
 
+**Step 6 (REPL), checked** with the real `repl.ts` in a pty (scratch Python drivers, not in
+git: `pty.fork`, keystrokes in, raw bytes out, a scrubbed environment) against the real
+`claude` on sonnet (`OPTCHAT_MODEL=sonnet`, scratch data dirs, one-line prompts, no proxy, so
+no rate-limit readings), and against the fake `claude` for what needs no model. The usage
+numbers are the REPL's own usage line: in · read · write · out, seconds.
+
+| # | Question | Result |
+|---|---|---|
+| R1 | A message typed while a tool runs (`sleep 12; echo ready`, the second message typed 2 s into the tool) | **Taken at the tool boundary, in the same call.** One usage line (`4 · 13,020 · 535 · 169`, 15.5 s); the answer carried the word asked for; log `user, tool, echo, user, talk`: the second `user` entry comes from the replay event, after the tool's `echo`. |
+| R2 | A message typed during the final text step (the model streaming 120 numbers) | The first call ended with its `result` (`2 · 6,381 · 258 · 241`, 3.2 s), all 120 numbers complete; the message was not taken, so it was requeued and got a **fresh call** (`2 · 6,659 · 244 · 4`, 1.4 s): `user, talk, user, talk`. No follow-up turn ran inside the first call (D3 holds with the real thing). |
+| R3 | Ctrl-C while a foreground tool runs (a `python3 -c` sleep of 117 s) | `cancelled` at once; `claude` was gone within 1.1 s, and the tool's process within 0.6 s (the cancel makes Claude Code kill it: `← Exit code 137` arrived, was shown and logged as `echo`; log `user, tool, echo`). No process left. A second Ctrl-C exited with 0. A compactor call (sonnet) started ~2 s later for the new entries, as it should. |
+| R4 | A long tool loop, outputs over the cap | Four Bash calls each printing 43–53 KB (one turn, 5 requests: `4 · 13,082 · 5,846 · 653`, 6.3 s): Claude Code replaced every output with a ~2.3 KB `<persisted-output>` notice (§13), so the log never held more. The next turn, typed at once, printed `waiting for 3 summaries…` (the pump had built one of the four echo summaries while the turn ran), then answered (`2 · 7,194 · 266 · 246`, 3.9 s). Its answer, 27333, was the last number of the preview it had been shown. A `Read` of a 48.8 KB file (8 requests, `8 · 72,376 · 24,018 · 775`, 10.4 s): Claude Code cut it near 30k chars and `cap()` trimmed the 44-char overshoot (`[… 44 chars cut …]`, 30,022 chars logged). |
+| R5 | A multi-line paste | One `user` message with its three newlines; the model counted the 3 lines of the block (`2 · 6,381 · 267 · 3`, 1.2 s). |
+| R6 | The default master (opus) | One turn answered (`2 · 6,254 · 408 · 4`, 1.8 s); 4 s idle afterwards, the background priming ran without an error line. |
+| R7 | The terminal behaviour, in a pty with the fake `claude` (and a compactor whose calls never finish, on the imported LOG.txt chat) | As §10 says: typing, Backspace, Ctrl-U, Ctrl-D; a paste whole and cut inside both markers with CR/CRLF newlines; Ctrl-C idle (hint, then exit) and busy (`cancelled`, then exit; a message typed mid-run and never taken is logged unanswered); a tool line arriving while typing (input line erased, redrawn below it); Ctrl-Z and `fg` (also with a running child: it stops and continues with the harness); SIGTERM and SIGHUP (exit 143 / 129, terminal restored, children gone); a second REPL refused; a UTF-8 character and an emoji cut across reads; escape sequences in model and tool text stripped; the imported chat (128 notes, a 31 KB view) opens, and `waiting for 1 summaries…` ends in a Ctrl-C that keeps the message unanswered. Found on the way and fixed: a closed terminal (SIGHUP) skipped the temp-dir clean-up because the terminal write in the exit handler threw; a prompt flashed after `waiting for N summaries…` (the session wasn't busy yet when `turn()` printed it). Found by reading: a `stop()` landing while a call ended with an untaken message could start one more call (the loop now checks `stopped`). |
+
+Cost of step 6's real calls: roughly 0.2M eq, nearly all sonnet (summed from the usage lines
+plus an estimate for the compactor calls, about a dozen, and the cheap priming calls; there
+was no proxy), one opus turn of about 1k eq.
+
 **Scheduled measurements** (approved; each at its step, results go into this section):
 
-- Step 4, done (§14 T1-T3). Still open from it: a *real* mid-run message (the replay event of a message taken at a tool boundary) is tested only against the fake `claude`; confirm it with the real thing in step 6, together with long tool loops.
+- Step 4, done (§14 T1-T3). Its open part, a *real* mid-run message (the replay event of a message taken at a tool boundary), was confirmed in step 6 (§14 R1, R2), together with a long tool loop (R4).
 - Step 5, done (§14 F1–F6): priming at full scale against the no-priming baseline; killed
   against completed priming requests, inconclusive (the proxy logs only the
   `anthropic-ratelimit-*` response headers).
@@ -704,14 +792,15 @@ session `claude-e6` (Herdr pane `wR:p1`); the build session is `optchat-impl` (p
   `git add -A` over scratch output. The first commit was the pre-existing
   SPEC/docs/dev files. No attribution trailer is configured.
 - **Tests:** few tests, only real failure scenarios; no per-function suites; no mutation
-  runs (§10). Step 6 adds a test only for a failure it actually finds.
+  runs (§10). Step 6 added one test (the paste); later work adds a test only for a failure
+  it actually finds.
 - **Reporting:** a short status after Phase 0 and after each build step: what works,
   measured usage where relevant, open issues. Send it with `SendMessage` to `claude-e6`
   (find the orchestrator with `herdr pane get wR:p1` and `ListAgents`) while work goes
   on. A final answer is delivered automatically, so don't send a separate completion
   message. A finding that breaks the design stops the work and goes into the report.
-- **Gate:** after steps 4 and 5 the user asked for the handover (§16) and for work to wait
-  until told to go on (step 5, then step 6). They may `/compact` first.
+- **Gate:** after steps 4, 5 and 6 the user asked for the handover (§16) and for work to wait
+  until told to go on (step 5, then step 6, then whatever comes next). They may `/compact` first.
 - **Subscription:** use it sparingly. Keep model calls in tests tiny (the fake `claude`
   exists for that). Scratch data dirs only (`OPTCHAT_DIR` with a short path), never
   `~/.optchat`. Never commit proxy logs, request dumps or stream taps (they hold the
@@ -727,21 +816,25 @@ session `claude-e6` (Herdr pane `wR:p1`); the build session is `optchat-impl` (p
   line: kill by PID (`ss -ltnp | grep :8399`). `Bun.spawn` without `env` passes the
   environment the process *started* with, not a `process.env` changed since: pass `env:
   { ...process.env, … }` (a test harness that skipped it would have started the real
-  `claude`). This machine's shell and Claude Code
+  `claude`). The same hook once blocked a Python heredoc that read `os.environ[...]`:
+  write driver scripts with the Write tool. `pgrep -f <pattern>` takes a regex and also
+  matches your own shell wrapper (its command line holds the whole heredoc): look at
+  `ps --ppid <pid>` or `/proc/<pid>/cmdline` instead. This machine's shell and Claude Code
   sessions export `CLAUDE_CODE_*`, `HERDR_*` and plugin dirs: measure with a scrubbed
   environment (§16.5).
 
 ## 16. State of the build and how to continue
 
-Written at the end of step 4 and updated at the end of step 5, so that a fresh session (or
-one after `/compact`) can go on from this file and `git log` alone.
+Written at the end of step 4 and updated at the end of steps 5 and 6, so that a fresh session
+(or one after `/compact`) can go on from this file and `git log` alone.
 
 ### 16.0 Start here
 
 1. Read this file fully, then `docs/optchat-gist.md` (the base spec; this file lists every
    deviation from it).
-2. `git log --oneline` and `bun test` (expect 16 passing).
-3. Do not start step 6 until the user says so (§15, Gate).
+2. `git log --oneline` and `bun test` (expect 17 passing).
+3. The build order (§12) is complete and nothing is planned beyond it. Don't start anything
+   new until the user says what (§15, Gate); §16.8 lists what is open.
 4. If something blocks, ask the orchestrator (`claude-e6`) with `SendMessage`.
 
 ### 16.1 Status
@@ -754,12 +847,13 @@ one after `/compact`) can go on from this file and `git log` alone.
 | 3 compactor calls | d74a2a2 | done, §14 S1–S4 |
 | 4 mcp, turn without priming | 269d2cf | done, §14 T1–T3 |
 | 5 prime | 240cfac (orphan fix), d2d2968 (proxy), ff3d093 | done, §6 as built, §14 F1–F6 |
-| 6 REPL polish | – | **waiting for the user's go-ahead** (§16.7) |
+| 6 REPL | 4ac3180 | done, §10 as built, §14 R1–R7 (§16.7) |
 
-`bun test`: 16 tests in one file, ~1.1 s, no model calls (§10: the suite was trimmed after
-step 5). Commits 84bc1b5 and d9d69f6 (the step 4 handover) and 9f415f7 (the proxy bound to
-loopback) are outside the steps. The REPL does not exist yet: `optchat` without a command
-prints the usage.
+`bun test`: 17 tests in one file, ~1.1 s, no model calls (§10: the suite was trimmed after
+step 5; step 6 added the paste test). Commits 84bc1b5 and d9d69f6 (the step 4 handover),
+9f415f7 (the proxy bound to loopback), 7af5d59 (the step 5 handover), 8204193 and d20ad9c
+(the test trim and its temp-dir clean-up) are outside the steps. The tool is complete:
+`optchat` without a command is the chat.
 
 ### 16.2 Code map (`src/`)
 
@@ -771,15 +865,17 @@ prints the usage.
 | `store.ts` | JSONL append (write + fsync), `loadChat`, `newMsg`, `committer` (persist + `addNode`), `acquireLock` |
 | `compactor.ts` | the pump: `createPump`, `buildFree`, `makeJob`, the `Job`/`Summarize` types |
 | `summarize.ts` | the real `Summarize`: layout A `blocks()`, retries, `cut()`, `SCALE`, `COMPACT_FILE`, `onCall` usage hook |
-| `claude.ts` | `spawnClaude` (`send`, `next`, `result`, `kill(grace)`, `stderr`, optional `tap`), `baseArgs`; the registry of running children and the exit/signal hooks that SIGTERM them (§5.2) |
+| `claude.ts` | `spawnClaude` (`send`, `next`, `result`, `kill(grace)`, `stderr`, optional `tap`), `baseArgs`; the registry of running children and the exit/signal hooks that SIGTERM them (§5.2), armed by `reapChildren()` |
 | `chat.ts` | `openChat`: lock + `loadChat` + pump + `log()` |
 | `prime.ts` | `createPrimer` (§6): `prime(view)`, `stop()` |
-| `turn.ts` | `writeSystemPrompt`, `mcpConfig`, `masterArgs`, `cap`, `createMapper`, `createSession` (the turn loop, foreground and idle priming, `input`/`cancel`/`stop`) |
+| `turn.ts` | `writeSystemPrompt`, `mcpConfig`, `masterArgs`, `cap`, `createMapper`, `createSession` (the turn loop, foreground and idle priming, `input`/`cancel`/`stop`/`whenIdle`, the `onIdle` option) |
+| `repl.ts` | `createKeys` (the raw-input parser: keys, bracketed paste, cut chunks), `repl(dir, openChat options)`: screen, keys, Ctrl-C/Ctrl-Z, exit paths (§10 as built) |
+| `persist.ts` | `commitData(dir, msg)`: the data dir's own git repo, one commit per turn (§10) |
 | `mcp.ts` | `TOOLS`, `zoom`, `date`, `serveMcp` |
 | `import.ts`, `browse.ts` | `parseOptmem`/`importOptmem`; `browseHtml` |
-| `cli.ts` | `view`, `browse`, `import-optmem`, `mcp` (the REPL is missing) |
+| `cli.ts` | no command: `repl(DIR)`; `view`, `browse`, `import-optmem`, `mcp` |
 | `fake-claude.ts` | test double for `claude -p` (format in its header; exits on a closed stdin and on SIGTERM) |
-| `selfcheck.test.ts` | the 16 tests (§10) |
+| `selfcheck.test.ts` | the 17 tests (§10) |
 | `fixtures/` | `turn-tools.jsonl`, `turn-thinking.jsonl`: real master streams, sanitized |
 
 `prompts/`: `compact.txt` (gist §4.4 verbatim), `scale.txt` (512 bytes), `master.txt`,
@@ -792,6 +888,9 @@ bun test
 OPTCHAT_DIR=<short scratch dir> bun src/cli.ts import-optmem    # real LOG.txt, read only
 OPTCHAT_DIR=<dir> bun src/cli.ts view                           # what the model sees
 OPTCHAT_DIR=<dir> bun src/cli.ts browse out.html
+OPTCHAT_DIR=<dir> OPTCHAT_MODEL=sonnet bun src/cli.ts           # the chat; sonnet as master for cheap checks
+printf 'hello\n' | OPTCHAT_DIR=<dir> bun src/cli.ts             # not a TTY: one message per line, exits when the turn is done
+ln -s ~/.claude/optchat/src/cli.ts ~/bin/optchat                # the install (works through the symlink; the user's choice)
 ```
 
 ### 16.4 Test rig
@@ -813,8 +912,8 @@ OPTCHAT_DIR=<dir> bun src/cli.ts browse out.html
   killed and fails the test), and `afterAll` checks that no `fake-claude.ts` is left among
   the run's children. `tmp()` dirs (and the `writeSystemPrompt` dir a rig makes) are removed
   in `afterAll`, from inside bun; a run adds nothing to `/tmp`. (Before this, every run left
-  ~60 `optchat-*` dirs behind; production makes one `optchat-XXXXXX` system-prompt dir per
-  start and doesn't remove it.)
+  ~60 `optchat-*` dirs behind. The REPL removes its own `optchat-XXXXXX` system-prompt dir
+  at exit, on every exit path but a SIGKILL; `view`, `browse` and `mcp` make none.)
 - `src/fixtures/*.jsonl` are real master streams (a turn with MCP and Bash; a thinking
   block). To record one: `createSession({ …, tap: file })` or `spawnClaude(args, env,
   tap)` writes every raw stdout line; replace the `system/init` paths and plugin lists
@@ -846,7 +945,20 @@ OPTCHAT_DIR=<dir> bun src/cli.ts browse out.html
   tokens, the rest small); step 3 eight sonnet calls (the largest a cold 39k-token
   write); step 4 about a dozen opus requests of 5–7k tokens and three thinking probes;
   step 5 about 540k eq (§14, after F6): twelve full-scale opus requests (a 128 KB view is
-  ~48k tokens, ~61k eq each time it is written), small checks and probes.
+  ~48k tokens, ~61k eq each time it is written), small checks and probes; step 6 about
+  0.2M eq, nearly all sonnet (§14 R1–R7).
+- The REPL in a pty (step 6; scratch Python, not in git): `pty.fork()` runs `bun
+  src/cli.ts` with `env` = HOME, PATH, LANG, TERM, `OPTCHAT_DIR` (a scratch dir) and
+  `OPTCHAT_MODEL=sonnet`; `os.write` the keystrokes (`\x1b[200~…\x1b[201~` a paste, `\x03`
+  Ctrl-C, `\x04` Ctrl-D, `\x1a` Ctrl-Z, `\r` Enter), `select` + `os.read` the output and
+  match it with regexes (the usage line `\(\d+ in · … s\)` ends a turn);
+  `termios.tcgetattr(master)` shows the terminal flags after the exit; closing the master
+  fd is a closed window. Ctrl-Z needs `bash -i` as the pty's program, with the REPL run in
+  it. For the fake `claude`, set `OPTCHAT_CLAUDE`, `FAKE_CLAUDE_SCRIPT`, `FAKE_CLAUDE_LOG`
+  (the repo's fake has no sleep step: use a scratch copy when output must arrive over
+  time). To keep every summary off the model, call `repl(dir, { summarize: () => new
+  Promise(() => {}) })` from a scratch script instead of the CLI. Check children by PID
+  (`ps --ppid`, `/proc`), not by `pgrep -f` (§15).
 
 ### 16.6 Step 5 (prime): done
 
@@ -867,45 +979,37 @@ Built as §6 "As built" says and measured as §14 F1–F6 says. To repeat the fu
 - Don't repeat the billing comparison without a better instrument: it cost ~250k eq and
   ended inconclusive (F6).
 
-### 16.7 Step 6 (REPL), in detail
+### 16.7 Step 6 (REPL): done
 
-- `src/cli.ts` with no command: `openChat(DIR)` (the lock; a second process exits with
-  `acquireLock`'s message), print the `problems` of the load, print the view (`render`),
-  then read input. `createSession({ chat, out, system: writeSystemPrompt(DIR), mcp:
-  mcpConfig(DIR) })` already does the rest: the `waiting for N summaries…` line, the
-  queue, mid-run delivery, cancel, and the priming (on by default, §6). Nothing is primed
-  at startup; the first turn primes in the foreground (+2–3 s), cheaply if the entries are
-  still cached.
-- On exit call `session.stop()` and `chat.close()`. `claude.ts` already SIGTERMs every
-  running child on `exit` and on SIGINT/SIGTERM/SIGHUP (it calls `process.exit(128 + n)`
-  for the signals), so restore the terminal in a `process.on("exit")` handler: it runs
-  after those signals too.
-- `out.info` is also called asynchronously (the compactor's `report`, a failed priming)
-  while the user may be typing: put a newline first when the cursor is mid-line, and
-  re-echo the prompt and the typed text after the line.
-- `Out` for the terminal: `text` raw; `thinking` dim (`ESC[2m … ESC[0m`); `info` on its
-  own dim line, with a newline first if the cursor is mid-line. No cursor movement, no
-  redraws (the scrollback must work).
-- Input: bracketed paste per §10 (raw mode; `ESC[200~`…`ESC[201~` is one message with
-  its newlines; Enter sends; minimal editing: printable characters, Backspace, Ctrl-U,
-  Ctrl-D on an empty line exits; echo it yourself). Not a TTY: one message per line.
-  Restore the terminal (`ESC[?2004l`, raw mode off) on every exit path, also on
-  Ctrl-Z and on uncaught errors.
-- Ctrl-C: `session.cancel()` if a turn runs or waits; a second Ctrl-C while idle exits
-  (`chat.close()` stops the pump and releases the lock).
-- Git commit of the data dir after every turn (§5.2): `git init` if missing, a
-  `.gitignore` with `lock`, `git add -A` and commit in the DATA dir only, and never fail
-  the turn on a git error (print it). Call it when `whenIdle()` resolves or from the
-  session after `ask()`.
-- `instructions.md` in the data dir is already read by `writeSystemPrompt`. The master's
-  cwd is the REPL's cwd.
-- Confirm with the real thing (so far only the fake `claude` and the Phase 0 probe cover
-  it): a mid-run message taken at a tool boundary and its replay event, one that arrives
-  during the final text step, Ctrl-C during a tool, a long tool loop (output over the
-  30k cap), a multi-line paste.
-- Install hint for the user: `ln -s ~/.claude/optchat/src/cli.ts ~/bin/optchat` (the file
-  is executable and starts with `#!/usr/bin/env bun`). Tell them about the first-run cost
-  of compacting an imported chat (§13).
+Built as §10 "As built" says (`repl.ts`, `persist.ts`, small changes in `turn.ts`, `claude.ts`,
+`cli.ts`) and checked as §14 R1–R7 says. What to know when touching it:
+
+- `repl(dir, options)` forwards `options` to `openChat` (a scratch script passes a `summarize`
+  that never finishes to keep every summary off the model). The session is built with
+  `onIdle`, which the REPL uses to clear its own `working` flag, commit the data dir and draw
+  the prompt. The REPL keeps its own `working` flag because the session's state is set only
+  after `turn()` has printed its first lines (`waiting for N summaries…`).
+- Screen state is three variables, `col0` (cursor at the start of a line), `onInput` (the
+  cursor is on the prompt line) and `buf` (what is typed). Everything that prints goes
+  through `put`; the prompt and the typed text are drawn only by `draw`/`show`. A change in
+  how output interleaves with typing belongs there, not in the callers.
+- The parser `createKeys` is pure and has the one test. A new key means a new entry in
+  `KEYS` and a handler in `keys`; a sequence it doesn't know is dropped, never echoed.
+- Exit paths all end in the `exit` event: `quit()` (Ctrl-D, second Ctrl-C, the end of piped
+  input) calls `process.exit(0)`, and signals go through `reapChildren`. Anything that must
+  happen at exit (the temp dir, the terminal) lives in that one handler and must not depend
+  on a terminal write succeeding.
+- Not done on purpose, and not planned: line editing beyond Backspace and Ctrl-U (no
+  cursor keys, no history), multi-row redraw of a wrapped input, a `--print` one-shot mode
+  (piping a line in is the one-shot), colours beyond dim, a status line.
+- For the user, when they install it: `ln -s ~/.claude/optchat/src/cli.ts ~/bin/optchat`
+  (the file is executable and starts with `#!/usr/bin/env bun`; it works through the
+  symlink). The first run on the imported LOG.txt chat starts ~82 sonnet calls at once
+  (§13): tell them before they open it. The data dir `~/.optchat` is its own git repo, one
+  commit per turn, with no remote: backing it up is theirs (gist §10: "the log is your life").
+- To re-check the REPL after a Claude Code upgrade, repeat §14 R1 (a message typed during a
+  tool), R2 (one during the final text) and R3 (Ctrl-C during a tool) with `OPTCHAT_MODEL=sonnet`
+  on a scratch chat: about 15k eq each.
 
 ### 16.8 Open points and risks
 
@@ -915,12 +1019,13 @@ Built as §6 "As built" says and measured as §14 F1–F6 says. To repeat the fu
 - Layout B for the compactor is unbuilt and only pays while consecutive calls add ≤ ~20
   lines (§7).
 - The master has a 1M-token context window, so no autocompact inside a turn is expected.
-  Very long tool loops are unmeasured.
+  Loops of 4 to 8 requests with big results were fine (§14 R4); loops of dozens of steps
+  are unmeasured.
 - Claude Code upgrades change the request and invalidate the cache once. Phase 0 was done
   on 2.1.289: re-check §14 P1–P3 (no leaks without `--safe-mode`, a stable prefix) after
   an upgrade, because a leak would silently break the prefix.
 - Real views have never been refused by the safety classifier (§13): every real call in
-  steps 3 to 5 passed, also the 475 templated (realistic) synthetic notes of step 5.
+  steps 3 to 6 passed, also the 475 templated (realistic) synthetic notes of step 5.
   Synthetic word-salad views were refused 3 times in 10.
 - The model may think or not (T1); thinking text is not available, only its size.
 - Whether a request killed at `message_start` is billed is unknown (§14 F6, inconclusive);
@@ -933,3 +1038,14 @@ Built as §6 "As built" says and measured as §14 F1–F6 says. To repeat the fu
   append rewrites it (F5): cheap while it is small.
 - What a real `claude` does when its stdin closes (a harness killed with SIGKILL) is not
   measured; the exit and signal hooks cover everything except SIGKILL (§5.2).
+- Background work ends with the call (§13): a server or watcher the master starts with
+  `run_in_background` dies when the turn ends, and `prompts/master.txt` doesn't say so.
+  Whether to tell the model is the user's call (the prompt is derived from the gist).
+- A big tool result is a `<persisted-output>` notice in the log, and the file it names is
+  Claude Code's, deleted by its own clean-up some day (§13): the log keeps the notice, not
+  the output.
+- Ctrl-Z during a real turn stops the `claude` child mid-request too (it works with the
+  fake); a long suspension may break its API stream: unmeasured. Ctrl-D, like a second
+  Ctrl-C, cancels a running turn.
+- Terminal limits (§10): a wrapped or pasted input is erased only on its last row, wide
+  characters back up one column, there are no cursor keys or history.
