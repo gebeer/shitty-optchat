@@ -682,13 +682,13 @@ describe("the turn (fake claude)", () => {
   const init = { type: "system", subtype: "init", mcp_servers: [{ name: "optchat", status: "connected" }] };
   const said = (text: string) => ({ type: "assistant", message: { content: [{ type: "text", text }] } });
   const result = { type: "result", subtype: "success", is_error: false, result: "", stop_reason: "end_turn", usage: {}, duration_ms: 1000 };
-  async function rig(script: object, o: { seed?: string[]; summarize?: Summarize } = {}) {
+  async function rig(script: object, o: { seed?: string[]; summarize?: Summarize; prime?: { idleMs: number } } = {}) {
     const dir = tmp(), seed = o.seed ?? ["alpha", "beta", "gamma"];
     seed.forEach((t, i) => appendMessage(dir, newMsg(i, "note", t, new Date(2026, 9, 4, 9 + i))));
     const f = fake(script);
     const { chat } = await openChat(dir, { summarize: o.summarize ?? (async () => "a summary") });
     const { seen, out } = collector(), system = writeSystemPrompt(dir), mcp = mcpConfig(dir);
-    const session = createSession({ chat, out, system, mcp });
+    const session = createSession({ chat, out, system, mcp, prime: o.prime ?? false }); // the turns below run without priming unless asked
     cleanups.push(() => (session.stop(), chat.close()));
     return { chat, session, f, seen, system, mcp, kinds: () => chat.mem.root.slice(seed.length).map((m) => `${m.kind}: ${m.text}`) };
   }
@@ -802,6 +802,68 @@ describe("the turn (fake claude)", () => {
     expect(never.kinds()).toEqual(["user: go"]);
     expect(never.f.starts().length).toBe(0);
     never.chat.close();
+  });
+});
+
+describe("priming (fake claude)", () => {
+  const accepted = { events: [{ type: "stream_event", event: { type: "message_start", message: { usage: {} } } }, { $hang: true }] }; // the API took the request, claude goes on until it is killed
+  const reply = { reply: "ok" };
+  const idleOff = { idleMs: 60_000 }; // the turn does its own priming
+  const rig = async (script: object, prime: { idleMs: number }, seed = ["alpha", "beta", "gamma"]) => {
+    const dir = tmp();
+    seed.forEach((t, i) => appendMessage(dir, newMsg(i, "note", t, new Date(2026, 9, 4, 9 + i))));
+    const f = fake(script);
+    const { chat } = await openChat(dir, { summarize: async () => "a summary" });
+    const { seen, out } = collector(), system = writeSystemPrompt(dir), mcp = mcpConfig(dir);
+    const session = createSession({ chat, out, system, mcp, prime });
+    cleanups.push(() => (session.stop(), chat.close()));
+    return { chat, session, f, seen, system, mcp };
+  };
+
+  test("a turn primes the view first with the master's own flags: the same blocks the turn then sends, marked, killed once accepted", async () => {
+    const r = await rig({ processes: [[accepted], [reply]] }, idleOff);
+    r.session.input("hello");
+    await r.session.whenIdle();
+    const [prime, turn] = r.f.messages(), [a, b] = r.f.starts();
+    expect(a.argv).toEqual(masterArgs(r.system, r.mcp));
+    expect(b.argv).toEqual(a.argv);
+    expect([a.env.DISABLE_PROMPT_CACHING, b.env.DISABLE_PROMPT_CACHING]).toEqual(["1", undefined]);
+    expect(prime.at(-1)).toEqual({ type: "text", text: "ok" });
+    expect(prime.slice(0, -1).map((x: any) => x.cache_control)).toEqual([{ type: "ephemeral" }]); // a view this short is one block
+    expect(prime.slice(0, -1).map((x: any) => x.text)).toEqual(turn.slice(0, -1).map((x: any) => x.text)); // byte for byte, or the view is rewritten
+    expect(turn.some((x: any) => x.cache_control)).toBe(false);
+    expect(turn.at(-1).text).toBe("hello");
+    await until(() => !alive(a.pid), 2000); // killed at message_start, it was never going to finish
+  });
+  test("a failing priming is reported once and the turns go on without it", async () => {
+    const r = await rig({ processes: [[{ exit: 1, stderr: "boom: not logged in" }], [reply], [{ exit: 1, stderr: "boom" }], [reply]] }, idleOff);
+    r.session.input("one");
+    await r.session.whenIdle();
+    r.session.input("two");
+    await r.session.whenIdle();
+    expect(r.f.starts().length).toBe(4);
+    expect(r.chat.mem.root.filter((m) => m.kind === "user").map((m) => m.text)).toEqual(["one", "two"]);
+    expect(r.seen.infos.filter((i) => i.startsWith("priming failed"))).toEqual([expect.stringContaining("boom: not logged in")]);
+  });
+  test("a cancel while the view is being primed leaves the message unanswered and starts no call", async () => {
+    const r = await rig({ processes: [[{ hang: true }]] }, idleOff);
+    r.session.input("go");
+    await until(() => r.f.messages().length === 1);
+    r.session.cancel();
+    await r.session.whenIdle();
+    expect(r.chat.mem.root.slice(3).map((m) => `${m.kind}: ${m.text}`)).toEqual(["user: go"]);
+    expect(r.f.starts().length).toBe(1);
+  });
+  test("a view that changed and stayed quiet is primed in the background, once; the next turn doesn't prime it again", async () => {
+    const r = await rig({ processes: [[accepted], [reply]] }, { idleMs: 30 });
+    r.chat.log("note", "something new");
+    await until(() => r.f.starts().length === 1);
+    await sleep(120);
+    expect(r.f.starts().length).toBe(1);
+    r.session.input("hello");
+    await r.session.whenIdle();
+    expect(r.f.starts().length).toBe(2); // the master only
+    expect(r.f.messages()[1].some((x: any) => x.cache_control)).toBe(false);
   });
 });
 

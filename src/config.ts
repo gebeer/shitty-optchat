@@ -18,5 +18,7 @@ export const MASTER_PERMISSION = process.env.OPTCHAT_PERMISSION_MODE ?? "bypassP
 export const COMPACT_MODEL = "sonnet";
 export const COMPACT_EFFORT = "medium";
 export const PRIME_MAX_AGE = 270_000; // ms: 5 min cache TTL minus margin
+export const PRIME_TIMEOUT = 30_000; // ms: a priming call the API hasn't accepted by then is given up on
+export const PRIME_IDLE = 1_000; // ms: how long the view must stay unchanged before it is primed in the background
 
 export const DIR = process.env.OPTCHAT_DIR ?? `${homedir()}/.optchat`;

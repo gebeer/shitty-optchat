@@ -4,9 +4,10 @@ import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import type { Chat } from "./chat.ts";
 import { type Block, type Claude, baseArgs, spawnClaude } from "./claude.ts";
-import { CAP, MASTER_EFFORT, MASTER_MODEL, MASTER_PERMISSION, MASTER_TOOLS } from "./config.ts";
+import { CAP, MASTER_EFFORT, MASTER_MODEL, MASTER_PERMISSION, MASTER_TOOLS, PRIME_IDLE } from "./config.ts";
+import { createPrimer } from "./prime.ts";
 import { type Kind, built } from "./tree.ts";
-import { cutBlocks, render, settle } from "./view.ts";
+import { allBuilt, cutBlocks, render, settle } from "./view.ts";
 
 const PROMPTS = new URL("../prompts/", import.meta.url).pathname;
 const CLI = new URL("./cli.ts", import.meta.url).pathname;
@@ -69,9 +70,23 @@ export function createMapper(o: { log: (kind: Kind, text: string) => void; out: 
 const n = (x: number) => (x ?? 0).toLocaleString("en-US");
 const usageLine = (r: any) => `(${n(r.usage?.input_tokens)} in · ${n(r.usage?.cache_read_input_tokens)} read · ${n(r.usage?.cache_creation_input_tokens)} write · ${n(r.usage?.output_tokens)} out · ${((r.duration_ms ?? 0) / 1000).toFixed(1)}s)`;
 
-export function createSession(o: { chat: Chat; out: Out; system: string; mcp: string; tap?: string }) {
+// `prime`: SPEC §6, on by default; `false` runs the turns without it, `idleMs` is the debounce of the background priming
+export function createSession(o: { chat: Chat; out: Out; system: string; mcp: string; tap?: string; prime?: { idleMs: number } | false }) {
   const { chat, out } = o, args = masterArgs(o.system, o.mcp), queue: string[] = [];
+  const primer = o.prime === false ? null : createPrimer({ args, report: (m) => out.info(m) }), idleMs = (o.prime || { idleMs: PRIME_IDLE }).idleMs;
   let call: Claude | null = null, sent: Sent[] = [], cancelled = false, stopped = false, abort: AbortController | null = null, loop: Promise<void> | null = null;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+
+  // SPEC §6: the view changed (fit() calls this after every change, and a turn calls it when it ends); once it has stayed quiet
+  // and nothing runs, prime it in the background. Nothing is primed at startup: a REPL opened only to look costs nothing.
+  const idle = () => {
+    clearTimeout(timer);
+    if (!primer) return;
+    timer = setTimeout(() => { if (!stopped && !loop && allBuilt(chat.mem)) void primer.prime(render(chat.mem)); }, idleMs);
+    timer.unref();
+  };
+  chat.mem.waiters.add(idle); // stays until stop()
+  const cancel = () => { cancelled = true; abort?.abort(); call?.kill(); };
 
   async function ask(view: string[], text: string) {
     sent = [];
@@ -103,18 +118,23 @@ export function createSession(o: { chat: Chat; out: Out; system: string; mcp: st
   async function turn() {
     try {
       while (queue.length) {
-        abort = new AbortController();
+        const ac = (abort = new AbortController());
         cancelled = false;
         const waiting = chat.mem.view.filter((p) => !built(chat.mem, p.l, p.i)).length;
         if (waiting) out.info(`waiting for ${waiting} summaries…`);
-        if (!(await settle(chat.mem, abort.signal))) { // the user cancelled: the messages stay in the log, unanswered
+        let view: string | null = null; // the view as it is BEFORE the new messages are logged
+        if (await settle(chat.mem, ac.signal)) {
+          view = render(chat.mem);
+          // SPEC §6: into the cache first (usually a no-op, the background priming did it); a cancel ends the wait, the priming goes on
+          if (primer) await Promise.race([primer.prime(view), new Promise((r) => ac.signal.addEventListener("abort", r, { once: true }))]);
+        }
+        if (!view || ac.signal.aborted) { // the user cancelled: the messages stay in the log, unanswered
           queue.splice(0).forEach((t) => chat.log("user", t));
           break;
         }
-        const view = cutBlocks(render(chat.mem)); // BEFORE the new messages are logged
         const texts = queue.splice(0);
         texts.forEach((t) => chat.log("user", t));
-        await ask(view, texts.join("\n\n"));
+        await ask(cutBlocks(view), texts.join("\n\n")); // the blocks that were primed
       }
     } catch (e: any) {
       out.info(`error: ${e.message}`);
@@ -129,11 +149,11 @@ export function createSession(o: { chat: Chat; out: Out; system: string; mcp: st
       if (stopped) return;
       if (call) { sent.push({ text, taken: false }); call.send([{ type: "text", text }]); return; }
       queue.push(text);
-      loop ??= turn().finally(() => (loop = null));
+      loop ??= turn().finally(() => ((loop = null), idle()));
     },
-    cancel() { cancelled = true; abort?.abort(); call?.kill(); },
-    // the end of the session (the REPL exiting): cancel what runs, take no more input
-    stop() { stopped = true; this.cancel(); },
+    cancel,
+    // the end of the session (the REPL exiting): cancel what runs, take no more input, drop the background priming
+    stop() { stopped = true; cancel(); clearTimeout(timer); chat.mem.waiters.delete(idle); primer?.stop(); },
     whenIdle: () => loop ?? Promise.resolve(),
     busy: () => loop !== null,
   };

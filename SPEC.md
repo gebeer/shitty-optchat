@@ -77,6 +77,9 @@ overrides only where noted):
 | `COMPACT_MODEL` | `sonnet` | |
 | `COMPACT_EFFORT` | `medium` | gist §4.2: low effort overshoots far more |
 | `PRIME_MAX_AGE` | 270 s | re-prime when the last prime is older (5 min cache TTL minus margin) |
+| `PRIME_TIMEOUT` | 30 s | a priming call the API hasn't accepted by then is given up on |
+| `PRIME_IDLE` | 1 s | how long the view must stay unchanged before it is primed in the background |
+| `KILL_GRACE` | 5 s | a killed `claude` gets SIGTERM, then SIGKILL after this (§5.2) |
 
 ## 3. Storage, tree, view, compactor ordering
 
@@ -242,8 +245,8 @@ weren't replayed are logged as `user`, unanswered (gist §7 "nothing is lost").
 
 **As built** (`createSession` in `turn.ts`): `input(text)` writes to the running
 call's stdin if there is one, otherwise it joins the queue and starts a turn.
-Messages that arrive before the turn takes the queue (while it waits in `settle`,
-later also in priming) join the same call: logged one by one, sent joined with a
+Messages that arrive before the turn takes the queue (while it waits in `settle` or in
+the priming of §6) join the same call: logged one by one, sent joined with a
 blank line. `cancel()` aborts the wait and kills the call. Untaken mid-run messages
 are requeued **only if the call ended with a `result`**; after a cancel or a crash
 they are logged as unanswered `user` messages (requeueing after a crash would loop
@@ -251,7 +254,7 @@ forever). A crash, a failed spawn, an `is_error` result and a refusal are printe
 with `out.info`, never retried; the user's message is already in the log. After each
 call a dim usage line is printed from `result.usage`. The session takes an `Out`
 (`{text, thinking, info}`); the REPL provides it. `stop()` is the end of the session
-(cancel what runs, take no more input).
+(cancel what runs, take no more input, drop the background priming).
 
 **Children never outlive the harness** (`claude.ts`): every running `claude -p` is
 registered; on exit and on SIGINT/SIGTERM/SIGHUP each gets SIGTERM, and `kill()` sends
@@ -303,6 +306,9 @@ reads it through the 20-block lookback. **[measured]**: the real turn's step 1
 read the full primed view in 6 of 6 runs, including the next turn after the
 view's tail changed. In steady state that saved ~35k input-token equivalents
 per turn (−73 % on step 1, −55 % on a 3-step turn); a cold turn costs +10 %.
+**[step 5]** At full scale (a 128 KB view, ~48k tokens, opus) a one-request turn costs
+61.3k eq without priming and 23.8k with it after a tail change (−61 %), 67.0k cold
+(+9 %); the real turn read the whole primed view every time (§14 F1).
 
 **How:**
 
@@ -321,7 +327,9 @@ prime(view):
 
 - The view blocks must be split exactly as in §5.1. Only the cache marks differ.
 - Killing at `message_start` already leaves the cache entry written
-  **[measured]**. Assume the request is billed for its full input.
+  **[measured]**, also when the upstream request is really cancelled (§14 F2).
+  Whether a killed request is billed is not known (§14 F6): assume it is billed
+  for its full input.
 - Hide the latency, about 2–3 s: also call `prime(render(view))` in the
   background whenever the harness is idle and `fit()` leaves the view fully
   built. Debounce it, about 1 s. The `await prime()` in `turn()` is then usually
@@ -329,6 +337,29 @@ prime(view):
 - If priming fails (non-zero exit before `message_start`), report it once and
   continue the turn without it. Priming is a cost optimization, never a
   correctness requirement.
+
+**As built** (`prime.ts`, and `createSession` in `turn.ts`):
+
+- `createPrimer({args, report})` returns `{prime(view), stop()}`. `args` is the
+  master's `masterArgs()`; `prime` takes the *rendered view string* and cuts it with
+  `cutBlocks`, and the turn sends `cutBlocks(view)` of the same string, so the primed
+  and the sent blocks are the same strings by construction (a test pins it). Calls
+  queue up on one promise chain, so a view is never primed twice at once and the
+  chain can't be broken by a failure. A view primed less than `PRIME_MAX_AGE` ago is
+  skipped.
+- Failure means: a `result` event before `message_start`, the process ending, or no
+  `message_start` within `PRIME_TIMEOUT` (30 s). It is reported once per streak
+  (`priming failed, the turn goes on without it: …`, reset by the next success).
+- In `turn()` the priming sits between `settle`/`render` and logging the new
+  messages. A cancel ends the wait (the queued messages stay in the log, unanswered,
+  as for a cancel in `settle`); the priming call itself goes on and `stop()` kills it.
+  Messages that arrive while it runs join the same call.
+- Idle priming: a persistent listener in `mem.waiters` (so after every `fit()`) and the
+  end of every turn restart a `PRIME_IDLE` (1 s) timer; when it fires with no turn
+  running and the view fully built, it primes `render(mem)`. **Nothing is primed at
+  startup**: a REPL opened only to look costs nothing.
+- `createSession({…, prime})`: on by default; `prime: {idleMs}` changes the debounce and
+  `prime: false` runs the turns without priming (the old tests do).
 
 ## 7. Compactor calls (adapts gist §4.2)
 
@@ -518,12 +549,13 @@ gives.
    (d74a2a2, §14 S1–S4).
 4. `mcp` (zoom/date), then `turn` without priming. End-to-end on a scratch data
    dir. Also record how thinking blocks appear in stream-json (§14). **Done**
-   (269d2cf, §14 T1–T3). **Stop here: §16 is the handover; wait for the user's
-   go-ahead before step 5.**
+   (269d2cf, §14 T1–T3). The handover (§16) was written here, and the build waited
+   for the user's go-ahead.
 5. `prime`. Confirm with the wire proxy or the `result` usage that step 1 reads
    the view (read ≈ view tokens, write ≈ new message + env). Measure it at full
    scale on opus against the no-priming baseline, and the billing of a killed
-   priming request (§14). Detailed plan: §16.6.
+   priming request (§14). **Done** (§6 as built, §14 F1–F6). Again the handover (§16)
+   and then a wait for the user's go-ahead before step 6.
 6. REPL polish, git commit per turn, mid-run messages, Ctrl-C paths. Detailed
    plan: §16.7.
 
@@ -569,7 +601,7 @@ Each step ends with `bun test` green. No step introduces new dependencies.
 
 ## 14. Measured findings (2026-10-04, Claude Code 2.1.289)
 
-Phase 0 (P1–P8), then step 3 (S1–S4) and step 4 (T1–T3); the scheduled ones come last.
+Phase 0 (P1–P8), then step 3 (S1–S4), step 4 (T1–T3) and step 5 (F1–F6); the scheduled ones come last.
 
 **Method (Phase 0).** `dev/wire-proxy.ts` as `ANTHROPIC_BASE_URL` (OAuth works through it),
 scrubbed child env (HOME, PATH and a few basics, so no inherited `CLAUDE_CODE_*`),
@@ -618,18 +650,34 @@ for leaks. Units: in / read / write = `input_tokens` / `cache_read_input_tokens`
 |---|---|---|
 | T1 | How do thinking blocks appear in stream-json? | opus-5-5, `--effort high`, adaptive thinking, with `--include-partial-messages`: `content_block_start` of type `thinking`, several `thinking_delta` events whose `thinking` is **empty** and whose `estimated_tokens` grows (50, 150, then `null`), a `signature_delta` (~1k chars), then an `assistant` event with a thinking block of length 0, then `content_block_stop`. **The text is never streamed**: the request carries `thinking: {type: adaptive, display: updates}`, and passing `--settings '{"showThinkingSummaries":true}'` only drops `display` from the request; the stream stays the same. So nothing can be shown live today; the mapper prints text if it ever arrives and otherwise one dim `thought for ~N tokens` line. Whether the model thinks at all is its own choice (some runs have no thinking block). |
 | T2 | End to end | Turn 1 (zoom, date, Bash, answer): 8 messages logged in order (`user, tool, echo, tool, echo, tool, echo, talk`), MCP results `10+0\|note: …` and `2026-10-02 15:59` (local time), usage over the 4 requests `in=4 read=6851 write=7205 out=324`, 5.1 s. Turn 2 answered from the view alone, no tool call (`in=2 read=5436 write=1726`). Turn 3 `read=5436 write=1817`. Without priming only tools+system (5,436) are read; the view and message (1.7–1.8k tokens here) are rewritten every turn: the §6 baseline, tiny in this chat. Wire: `user[userEmail, git attribution, view (1 block, unmarked), message]`, `system` marks 2 + the env message 1 (Claude Code's), tools = 8 + 2 MCP sorted. |
-| T3 | `rate_limit_event` | Every turn emits `rate_limit_info.unifiedWindows.{five_hour,seven_day}.utilization` with **0.01 resolution** (0.02 and 0.04 after all the work so far), too coarse to see one request. The step 5 billing comparison therefore needs the finer `anthropic-ratelimit-*` response headers, and may still be inconclusive. |
+| T3 | `rate_limit_event` | Every turn emits `rate_limit_info.unifiedWindows.{five_hour,seven_day}.utilization` with **0.01 resolution** (0.02 and 0.04 after all the work so far), too coarse to see one request. Step 5 therefore logged the `anthropic-ratelimit-*` response headers; they turned out to have the same resolution (F6). |
+
+**Step 5 (priming), measured** with the real `prime.ts` and `turn.ts`: opus-5-5, a synthetic
+475-note chat whose view is 127,733 chars / 127,886 B in 4 blocks of 49,975 / 29,948 / 19,903 /
+27,907 chars (~48.2k tokens at ~2.65 chars per token; every level-0 node is free, no compactor
+call), tools = 8 + 2 MCP, one-request turns ("Reply with just OK."), through the wire proxy
+(which now cancels the upstream request when the client leaves). eq = in + 0.1·read +
+1.25·write + 5·out.
+
+| # | Question | Result |
+|---|---|---|
+| F1 | Priming against no priming, at full scale | **No priming:** turn 1 `in=2 read=5,436 write=48,553 out=4`, turn 2 (tail changed by the two messages turn 1 logged) `read=5,436 write=48,580`: **61.3k eq per turn**, 2.6 s / 2.4 s wall. **Primed, cold:** priming call (killed at `message_start`) `in=381 read=5,436 write=48,168 out=4`, real turn `in=2 read=53,604 write=385 out=4`: **67.0k eq (+9 %)**, 5.6 s wall (+3.0 s). **Primed, after the tail change:** priming call `in=381 read=43,298 write=10,331 out=64` (reads the first three blocks, rewrites the changed last one), real turn `in=2 read=53,629 write=387`: **23.8k eq (−61 %)**, 4.6 s wall (+2.2 s). The real turn read the whole primed view both times. |
+| F2 | Is the cache written when the request is killed at `message_start` *and the upstream request is cancelled*? | **Yes.** `message_start` already carries `write=48,168`, and the real turn then read it. Phase 0's P6 had used a proxy that kept the upstream request running after the kill; this repeats it with a faithful disconnect (the proxy aborts upstream, the record says `aborted`). The premise of §6 holds on a direct connection. |
+| F3 | Does the kill always land in time? | No. A priming call's answer is a few tokens, so it sometimes finishes first: of 6 kill attempts, 4 were aborted mid-stream (`out=4–8`) and 2 completed (`out=64`, `out=72`; ~320–360 eq of output). Both completed ones were re-primings after a tail change (they read most of the view, so they start answering sooner). Harmless. |
+| F4 | Latency | Spawn to `message_start` 1.9–3.6 s at full scale: that is what a turn waits when the background priming has not run (+2.2 s to +3.0 s wall per turn in F1). |
+| F5 | Idle priming (real API, 120 notes, view 12.4k tokens) | Turn 1 foreground-primed (4.5 s). About 1 s after it ended the background priming ran (`in=381 read=5,436 write=12,453`: a view under 50k chars is **one** block, so every append rewrites it whole; with a longer view only the last block is rewritten, F1). Turn 2 found the view fresh and sent no priming call of its own: 2.3 s wall (the no-priming time), `read=17,889 write=387`. |
+| F6 | Is a request killed at `message_start` billed? | **Inconclusive.** A subscription shows only `anthropic-ratelimit-unified-*` headers (5h and 7d utilization, status, reset, representative claim, overage), with **two decimals** (0.09 → 0.10): the same resolution as `rate_limit_event`. One step was ~100–250k eq in these runs, and the other sessions on the account move the same counters. Two killed and two completed requests of identical size (`write=48,168`, ~61k eq each if billed in full, ~246k together), interleaved K C K C with tiny haiku probes between, moved the 5h reading one step (0.09 → 0.10, after the first completed one) and the 7d reading one step (0.04 → 0.05, at the end): no step after a killed request, but four requests cannot separate that from chance. Stopped after two pairs. The §6 assumption stays: billed in full. |
+
+Cost of step 5's real calls: about 540k eq (the billing pairs ~250k, the baseline and primed
+runs ~215k, the idle check ~40k, a warm-up and a stray haiku probe ~35k), roughly +3 points of
+the 5-hour utilization (0.07 → 0.10, other sessions included).
 
 **Scheduled measurements** (approved; each at its step, results go into this section):
 
 - Step 4, done (§14 T1-T3). Still open from it: a *real* mid-run message (the replay event of a message taken at a tool boundary) is tested only against the fake `claude`; confirm it with the real thing in step 6, together with long tool loops.
-- Step 5: priming at full scale on opus (a ~128 KB view): `read`/`write` per step of
-  the real turn against the no-priming baseline, cold and after a tail change.
-- Step 5: whether a request killed at `message_start` is billed. Per-request billing
-  isn't visible on a subscription, so the proxy logs **only** the
-  `anthropic-ratelimit-*` response headers (never auth or any other header), and
-  the utilization change of a killed priming request is compared with a completed
-  one. If that is inconclusive, say so; the §6 assumption (billed in full) stays.
+- Step 5, done (§14 F1–F6): priming at full scale against the no-priming baseline; killed
+  against completed priming requests, inconclusive (the proxy logs only the
+  `anthropic-ratelimit-*` response headers).
 - Not needed: the meaning of `queued_turn_count` (the harness kills at the first
   `result`).
 
