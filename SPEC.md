@@ -225,7 +225,7 @@ event, emitted when Claude Code takes the message.
 | event | action |
 |---|---|
 | `stream_event` text deltas | print live (no logging) |
-| `stream_event` thinking deltas | print live, dimmed; **never log** (gist §2) |
+| `stream_event` thinking deltas | print live, dimmed; **never log** (gist §2). Today they carry no text (§14 T1): print the text if it ever arrives, else one dim line `thought for ~N tokens` when the thinking block completes |
 | `assistant` with a `text` block | `log("talk", text)` |
 | `assistant` with a `tool_use` block | `log("tool", name + " " + JSON.stringify(input))` |
 | `assistant` with a `thinking` block | ignore |
@@ -515,11 +515,17 @@ for leaks. Units: in / read / write = `input_tokens` / `cache_read_input_tokens`
 | S3 | Size and quality | 4 of 4 summaries 340–453 bytes, no retries, no refusals; the user's words kept verbatim; 3.1–4.7 s per call. On the real imported notes: 3 merges `ctx 4/36/66 lines`, 425–461 bytes from two ~260-byte notes each, no retries, no refusals; cold writes 1.6k / 4.7k / 7.7k tokens (the context differs every time, so nothing is read). |
 | S4 | The imported tree | 128 notes give 255 nodes; 173 are free (128 level-0 plus 45 merges), 82 need the model (19 level-1 merges are ready, the rest unlock level by level). Not run in full: it costs ~82 calls. |
 
+**Step 4 (MCP + turn), measured** with the real `turn.ts` and an opus master, a 12-note synthetic chat, tools `Bash` + MCP:
+
+| # | Question | Result |
+|---|---|---|
+| T1 | How do thinking blocks appear in stream-json? | opus-5-5, `--effort high`, adaptive thinking, with `--include-partial-messages`: `content_block_start` of type `thinking`, several `thinking_delta` events whose `thinking` is **empty** and whose `estimated_tokens` grows (50, 150, then `null`), a `signature_delta` (~1k chars), then an `assistant` event with a thinking block of length 0, then `content_block_stop`. **The text is never streamed**: the request carries `thinking: {type: adaptive, display: updates}`, and passing `--settings '{"showThinkingSummaries":true}'` only drops `display` from the request; the stream stays the same. So nothing can be shown live today; the mapper prints text if it ever arrives and otherwise one dim `thought for ~N tokens` line. Whether the model thinks at all is its own choice (some runs have no thinking block). |
+| T2 | End to end | Turn 1 (zoom, date, Bash, answer): 8 messages logged in order (`user, tool, echo, tool, echo, tool, echo, talk`), MCP results `10+0\|note: …` and `2026-10-02 15:59` (local time), usage over the 4 requests `in=4 read=6851 write=7205 out=324`, 5.1 s. Turn 2 answered from the view alone, no tool call (`in=2 read=5436 write=1726`). Turn 3 `read=5436 write=1817`. Without priming only tools+system (5,436) are read; the view and message (1.7–1.8k tokens here) are rewritten every turn: the §6 baseline, tiny in this chat. Wire: `user[userEmail, git attribution, view (1 block, unmarked), message]`, `system` marks 2 + the env message 1 (Claude Code's), tools = 8 + 2 MCP sorted. |
+| T3 | `rate_limit_event` | Every turn emits `rate_limit_info.unifiedWindows.{five_hour,seven_day}.utilization` with **0.01 resolution** (0.02 and 0.04 after all the work so far), too coarse to see one request. The step 5 billing comparison therefore needs the finer `anthropic-ratelimit-*` response headers, and may still be inconclusive. |
+
 **Scheduled measurements** (approved; each at its step, results go into this section):
 
-- Step 4: how thinking blocks appear in the stream-json output (events, with and
-  without `--include-partial-messages`), shown live and dimmed, never logged (§5.3);
-  long tool loops.
+- Step 4, done (§14 T1-T3). Still open from it: a *real* mid-run message (the replay event of a message taken at a tool boundary) is tested only against the fake `claude`; confirm it with the real thing in step 6, together with long tool loops.
 - Step 5: priming at full scale on opus (a ~128 KB view): `read`/`write` per step of
   the real turn against the no-priming baseline, cold and after a tail change.
 - Step 5: whether a request killed at `message_start` is billed. Per-request billing

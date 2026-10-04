@@ -1,4 +1,6 @@
 // `claude -p` child processes: stream-json user messages in, stream-json events out (SPEC §4).
+import { appendFileSync } from "node:fs";
+
 export type Block = { type: "text"; text: string; cache_control?: { type: "ephemeral" } };
 
 // the flags every call shares; callers add --mcp-config, --safe-mode, ...
@@ -9,7 +11,8 @@ export const baseArgs = (model: string, effort: string, systemFile: string, tool
   "--system-prompt-file", systemFile, "--tools", tools,
 ];
 
-export function spawnClaude(args: string[], env: Record<string, string> = {}) {
+// `tap`: a file that gets every raw stdout line, to record a stream for a fixture (never commit one of a real chat)
+export function spawnClaude(args: string[], env: Record<string, string> = {}, tap?: string) {
   const child = Bun.spawn([process.env.OPTCHAT_CLAUDE ?? "claude", ...args], {
     env: { ...process.env, CLAUDE_CODE_PROMPT_CACHE_TTL: "5m", ...env }, // 5m marks only: a 5m mark after a 1h one is a 400
     stdin: "pipe", stdout: "pipe", stderr: "pipe",
@@ -29,6 +32,7 @@ export function spawnClaude(args: string[], env: Record<string, string> = {}) {
         if (nl >= 0) {
           const line = buf.slice(0, nl);
           buf = buf.slice(nl + 1);
+          if (tap && line.trim()) appendFileSync(tap, `${line}\n`);
           try { if (line.trim()) return JSON.parse(line); } catch {}
           continue;
         }
@@ -44,5 +48,7 @@ export function spawnClaude(args: string[], env: Record<string, string> = {}) {
     },
     kill: () => child.kill(),
     exited: child.exited,
+    stderr: () => stderr,
   };
 }
+export type Claude = ReturnType<typeof spawnClaude>;

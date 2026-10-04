@@ -3,11 +3,14 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { appendFileSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { browseHtml } from "./browse.ts";
-import { type Job, createPump } from "./compactor.ts";
-import { NODE, TRIES } from "./config.ts";
+import { openChat } from "./chat.ts";
+import { type Job, type Summarize, buildFree, createPump } from "./compactor.ts";
+import { CAP, MASTER_EFFORT, MASTER_MODEL, MASTER_PERMISSION, MASTER_TOOLS, NODE, TRIES } from "./config.ts";
+import { TOOLS, date, zoom } from "./mcp.ts";
 import { importOptmem, parseOptmem } from "./import.ts";
-import { acquireLock, appendMessage, appendNode, loadChat, newMsg } from "./store.ts";
+import { acquireLock, appendMessage, appendNode, committer, loadChat, newMsg } from "./store.ts";
 import { COMPACT_FILE, SCALE, type CallInfo, blocks, cut, makeSummarizer } from "./summarize.ts";
+import { type Sent, cap, createMapper, createSession, masterArgs, mcpConfig, writeSystemPrompt } from "./turn.ts";
 import { type Mem, built, bytes, coords, dayOf, freeText, getNode, label, newMem, ready, setNode, span } from "./tree.ts";
 import { PLACEHOLDER, addMessage, addNode, allBuilt, context, cutBlocks, first, refold, render, settle } from "./view.ts";
 
@@ -18,6 +21,19 @@ const user = (i: number, size: number) => newMsg(i, "user", "a".repeat(size - "u
 const node = (l: number, i: number, size: number) => ({ l, i, text: "n".repeat(size), size });
 const tmp = () => mkdtempSync(`${tmpdir()}/optchat-test-`);
 const mergeable = (mem: Mem) => mem.view.some((a, k) => { const b = mem.view[k + 1]; return b && a.l === b.l && a.i % 2 === 0 && b.i === a.i + 1 && built(mem, a.l + 1, a.i / 2); });
+
+const FAKE = `${import.meta.dir}/fake-claude.ts`;
+const alive = (pid: number) => { try { return process.kill(pid, 0); } catch { return false; } };
+// a fake `claude` for the code under test (see fake-claude.ts for the script format)
+function fake(script: object) {
+  const dir = tmp(), log = `${dir}/log.jsonl`;
+  writeFileSync(log, "");
+  writeFileSync(`${dir}/script.json`, JSON.stringify(script));
+  Object.assign(process.env, { OPTCHAT_CLAUDE: FAKE, FAKE_CLAUDE_LOG: log, FAKE_CLAUDE_SCRIPT: `${dir}/script.json` });
+  const entries = () => readFileSync(log, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+  return { starts: () => entries().filter((e) => e.argv), messages: () => entries().filter((e) => e.message).map((e) => e.message.message.content) };
+}
+afterEach(() => { for (const k of ["OPTCHAT_CLAUDE", "FAKE_CLAUDE_LOG", "FAKE_CLAUDE_SCRIPT"]) delete process.env[k]; });
 
 describe("tree", () => {
   test("id+n names a node by its first message and the messages it covers", () => {
@@ -392,18 +408,6 @@ describe("import-optmem, view, browse", () => {
 describe("compactor calls (fake claude, no model)", () => {
   const msgJob = (text = "hi", ctx: string[] = []): Job => ({ l: 0, i: ctx.length, ctx, msg: newMsg(ctx.length, "user", text) });
   const mergeJob = (a: string, b: string, ctx: string[] = []): Job => ({ l: 1, i: 0, ctx, a, b });
-  const FAKE = `${import.meta.dir}/fake-claude.ts`;
-  const alive = (pid: number) => { try { return process.kill(pid, 0); } catch { return false; } };
-  function fake(script: object[]) {
-    const dir = tmp(), log = `${dir}/log.jsonl`;
-    writeFileSync(log, "");
-    writeFileSync(`${dir}/script.json`, JSON.stringify(script));
-    Object.assign(process.env, { OPTCHAT_CLAUDE: FAKE, FAKE_CLAUDE_LOG: log, FAKE_CLAUDE_SCRIPT: `${dir}/script.json` });
-    const entries = () => readFileSync(log, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
-    return { starts: () => entries().filter((e) => e.argv), messages: () => entries().filter((e) => e.message).map((e) => e.message.message.content) };
-  }
-  afterEach(() => { for (const k of ["OPTCHAT_CLAUDE", "FAKE_CLAUDE_LOG", "FAKE_CLAUDE_SCRIPT"]) delete process.env[k]; });
-
   test("SCALE is exactly NODE bytes with no newline, compact.txt is the gist's COMPACT prompt verbatim", () => {
     expect(bytes(SCALE)).toBe(NODE);
     expect(SCALE.includes("\n")).toBe(false);
@@ -497,5 +501,282 @@ describe("compactor calls (fake claude, no model)", () => {
     p.stop();
     expect(reports).toEqual([]);
     expect(f.messages().map((c) => c[0].text).sort()).toEqual(["<chat>\n</chat>", "<chat>\nsummary line\n</chat>", "<chat>\nsummary line\nsummary line\n</chat>"]);
+  });
+});
+
+describe("mcp tools", () => {
+  const four = () => {
+    const m = newMem();
+    ["one", "two", "three\nlines", "four"].forEach((t, i) => addMessage(m, newMsg(i, i % 2 ? "talk" : "user", t, new Date(2026, 9, 4, 10 + i, 7))));
+    return m;
+  };
+  const built4 = () => { const m = four(); buildFree(m, (n) => addNode(m, n)); return m; }; // 4 lines, (1,0), (1,1), (2,0)
+
+  test("zoom opens a line into the two lines under it, and gives the message whole at n = 1", () => {
+    const m = built4();
+    expect(zoom(m, 0, 1)).toBe("0+0|user: one");
+    expect(zoom(m, 2, 1)).toBe("2+0|user: three\nlines"); // newlines kept
+    expect(zoom(m, 0, 2)).toBe("0+1|user: one\n1+1|talk: two");
+    expect(zoom(m, 2, 2)).toBe("2+1|user: three lines\n3+1|talk: four"); // lines flattened like the view
+    expect(zoom(m, 0, 4)).toBe("0+2|user: one talk: two\n2+2|user: three lines talk: four");
+  });
+  test("zoom says 'No line id+n.' for anything that is not a built line", () => {
+    const m = built4();
+    for (const [id, n] of [[1, 2], [0, 3], [0, 8], [4, 1], [-1, 1], [0, 0], [0.5, 1], ["0", 1], [undefined, 1]]) expect(zoom(m, id, n)).toBe(`No line ${id}+${n}.`);
+    const bare = four(); // no nodes built yet
+    expect(zoom(bare, 0, 2)).toBe("No line 0+2.");
+    expect(zoom(bare, 0, 1)).toBe("0+0|user: one"); // a message can always be opened
+  });
+  test("date is the local time of the message", () => {
+    const m = built4();
+    expect(date(m, 1)).toBe("2026-10-04 11:07");
+    for (const id of [4, -1, 1.5, "1", undefined]) expect(date(m, id)).toBe(`No message ${id}.`);
+  });
+  test("the tool descriptions are the gist's, verbatim", () => {
+    const gist = readFileSync(`${import.meta.dir}/../docs/optchat-gist.md`, "utf8").replace(/\n\s+/g, " ");
+    for (const t of TOOLS) expect(gist).toContain(`- ${t.name}: "${t.description}"`);
+    expect(TOOLS.map((t) => t.name)).toEqual(["zoom", "date"]);
+  });
+  test("the stdio server: initialize, list, call; it reads the disk afresh and never takes the lock", async () => {
+    const dir = tmp(), { mem } = loadChat(dir);
+    ["one", "two", "three", "four"].forEach((t, i) => { const m = newMsg(i, "user", t, new Date(2026, 9, 4, 10 + i, 7)); appendMessage(dir, m); addMessage(mem, m); });
+    buildFree(mem, committer(dir, mem));
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone; // bun test runs in UTC, a child would use the system zone
+    const proc = Bun.spawn(["bun", `${import.meta.dir}/cli.ts`, "mcp"], { env: { ...process.env, OPTCHAT_DIR: dir, TZ: tz }, stdin: "pipe", stdout: "pipe", stderr: "pipe" });
+    const reader = proc.stdout.getReader(), dec = new TextDecoder();
+    let buf = "";
+    const rpc = async (req: object) => {
+      proc.stdin.write(JSON.stringify({ jsonrpc: "2.0", ...req }) + "\n");
+      proc.stdin.flush();
+      while (!buf.includes("\n")) { const r = await reader.read(); if (r.done) throw new Error("the server closed its output"); buf += dec.decode(r.value); }
+      const line = buf.slice(0, buf.indexOf("\n"));
+      buf = buf.slice(line.length + 1);
+      return JSON.parse(line);
+    };
+    const text = (r: any) => r.result.content[0].text, call = (name: string, args: object) => ({ method: "tools/call", params: { name, arguments: args } });
+    try {
+      expect((await rpc({ id: 1, method: "initialize", params: { protocolVersion: "2025-06-18" } })).result).toEqual({ protocolVersion: "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "optchat", version: "1" } });
+      proc.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n"); // a notification gets no answer
+      expect((await rpc({ id: 2, method: "tools/list" })).result.tools).toEqual(TOOLS);
+      expect(text(await rpc({ id: 3, ...call("zoom", { id: 0, n: 2 }) }))).toBe("0+1|user: one\n1+1|user: two");
+      expect(text(await rpc({ id: 4, ...call("date", { id: 2 }) }))).toBe("2026-10-04 12:07");
+      appendMessage(dir, newMsg(4, "talk", "five", new Date(2026, 9, 5, 8, 30))); // written after the server started
+      expect(text(await rpc({ id: 5, ...call("zoom", { id: 4, n: 1 }) }))).toBe("4+0|talk: five");
+      const bad = await rpc({ id: 6, ...call("nope", {}) });
+      expect([bad.result.isError, text(bad)]).toEqual([true, "error: unknown tool nope"]);
+      expect((await rpc({ id: 7, method: "bogus" })).error.code).toBe(-32601);
+      expect((await rpc({ id: 8, method: "ping" })).result).toEqual({});
+      expect(existsSync(`${dir}/lock`)).toBe(false);
+    } finally {
+      proc.kill();
+      rmSync(dir, { recursive: true });
+    }
+  });
+});
+
+const read = (f: string) => readFileSync(`${import.meta.dir}/../prompts/${f}`, "utf8");
+const fixture = (name: string): any[] => readFileSync(`${import.meta.dir}/fixtures/${name}.jsonl`, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+const collector = () => {
+  const seen = { texts: [] as string[], thoughts: [] as string[], infos: [] as string[] };
+  return { seen, out: { text: (s: string) => void seen.texts.push(s), thinking: (s: string) => void seen.thoughts.push(s), info: (s: string) => void seen.infos.push(s) } };
+};
+function mapAll(events: any[], sent: Sent[] = []) {
+  const logs: [string, string][] = [], { seen, out } = collector();
+  const map = createMapper({ log: (k, t) => void logs.push([k, t]), out, sent });
+  events.forEach(map);
+  return { logs, ...seen };
+}
+
+describe("turn pieces", () => {
+  test("cap keeps the head and the tail of a long tool result", () => {
+    expect(cap("x".repeat(CAP))).toBe("x".repeat(CAP));
+    expect(cap("a".repeat(20_000) + "b".repeat(20_000))).toBe(`${"a".repeat(15_000)}\n[… 10000 chars cut …]\n${"b".repeat(15_000)}`);
+  });
+  test("master.txt is the gist's MASTER without the subagent paragraph and sentence; view_doc.txt is VIEW_DOC verbatim", () => {
+    const gist = readFileSync(`${import.meta.dir}/../docs/optchat-gist.md`, "utf8"), sec = gist.slice(gist.indexOf("### 7.2 The system prompt"));
+    const [p1, p2] = /MASTER:\n```\n([\s\S]*?)\n```/.exec(sec)![1].split("\n\n");
+    expect(read("master.txt")).toBe(`${p1.replace("\nUse subagents only when the user asks for them.", "")}\n\n${p2}`);
+    expect(read("master.txt")).not.toContain("ubagent");
+    expect(read("view_doc.txt")).toBe(/VIEW_DOC:\n```\n([\s\S]*?)\n```/.exec(sec)![1]);
+  });
+  test("the system prompt file is MASTER + VIEW_DOC + the user's instructions", () => {
+    const dir = tmp();
+    expect(readFileSync(writeSystemPrompt(dir), "utf8")).toBe(`${read("master.txt")}\n\n${read("view_doc.txt")}\n\n`);
+    writeFileSync(`${dir}/instructions.md`, "Be brief.");
+    expect(readFileSync(writeSystemPrompt(dir), "utf8")).toBe(`${read("master.txt")}\n\n${read("view_doc.txt")}\n\nBe brief.`);
+  });
+  test("masterArgs: the base flags, then mcp, permission mode and replay; mcpConfig names the server and the data dir", () => {
+    expect(JSON.parse(mcpConfig("/data/x"))).toEqual({ mcpServers: { optchat: { command: process.execPath, args: [`${import.meta.dir}/cli.ts`, "mcp"], env: { OPTCHAT_DIR: "/data/x" } } } });
+    const args = masterArgs("/tmp/sys.txt", "{}");
+    expect(args).toEqual(["-p", "--model", MASTER_MODEL, "--effort", MASTER_EFFORT, "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
+      "--include-partial-messages", "--no-session-persistence", "--setting-sources", "", "--strict-mcp-config", "--system-prompt-file", "/tmp/sys.txt", "--tools", MASTER_TOOLS,
+      "--mcp-config", "{}", "--permission-mode", MASTER_PERMISSION, "--replay-user-messages"]);
+    expect(args).not.toContain("--safe-mode"); // it would drop the MCP server (SPEC §14 P1)
+  });
+});
+
+describe("event to log mapping (recorded streams)", () => {
+  test("zoom, date and Bash in a real stream: tool/echo pairs, then the answer; the streamed text is the logged text", () => {
+    const r = mapAll(fixture("turn-tools"));
+    expect(r.logs.map(([k]) => k)).toEqual(["tool", "echo", "tool", "echo", "tool", "echo", "talk"]);
+    expect(r.logs[0]).toEqual(["tool", 'mcp__optchat__zoom {"id":10,"n":1}']);
+    expect(r.logs[1][1].startsWith("10+0|note: Fixed the retry wrapper")).toBe(true);
+    expect(r.logs[3]).toEqual(["echo", "2026-10-02 15:59"]);
+    expect(r.logs[5]).toEqual(["echo", "Linux"]);
+    expect(r.logs[6][1]).toContain("`uname -s` returned `Linux`");
+    expect(r.texts.join("")).toBe(r.logs[6][1]);
+    expect(r.infos.filter((i) => i.startsWith("→")).length).toBe(3);
+    expect(r.infos.some((i) => i.startsWith("warning"))).toBe(false); // the optchat MCP server is connected
+  });
+  test("a thinking block carries no text: one dim line, never logged", () => {
+    const r = mapAll(fixture("turn-thinking"));
+    expect(r.logs).toEqual([["talk", "142"]]);
+    expect(r.thoughts).toEqual([]);
+    expect(r.infos.filter((i) => /^thought for ~\d+ tokens$/.test(i)).length).toBe(1);
+    const shown = mapAll([{ type: "stream_event", event: { type: "content_block_delta", delta: { type: "thinking_delta", thinking: "hmm", estimated_tokens: 3 } } }]);
+    expect(shown.thoughts).toEqual(["hmm"]); // text is shown if it ever arrives
+    expect(shown.logs).toEqual([]);
+  });
+  test("the opening replay is skipped, a later one logs the message the user sent mid-run; results join text parts, images become [image]", () => {
+    const replay = (text: string) => ({ type: "user", isReplay: true, message: { role: "user", content: [{ type: "text", text }] } });
+    const sent: Sent[] = [{ text: "also this", taken: false }, { text: "and that", taken: false }];
+    const r = mapAll([
+      replay("the view and the opening message"),
+      { type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", input: { command: "ls" } }] } },
+      { type: "user", message: { content: [{ type: "tool_result", tool_use_id: "t", content: [{ type: "text", text: "a.txt" }, { type: "image", source: {} }] }] } },
+      replay("also this"),
+      { type: "assistant", message: { content: [{ type: "text", text: "  " }, { type: "text", text: "done" }] } },
+    ], sent);
+    expect(r.logs).toEqual([["tool", 'Bash {"command":"ls"}'], ["echo", "a.txt\n[image]"], ["user", "also this"], ["talk", "done"]]);
+    expect(sent.map((s) => s.taken)).toEqual([true, false]);
+  });
+  test("an MCP server that is not connected is reported", () => {
+    expect(mapAll([{ type: "system", subtype: "init", mcp_servers: [{ name: "optchat", status: "failed" }] }]).infos[0]).toContain("not connected");
+  });
+});
+
+describe("the turn (fake claude)", () => {
+  const init = { type: "system", subtype: "init", mcp_servers: [{ name: "optchat", status: "connected" }] };
+  const said = (text: string) => ({ type: "assistant", message: { content: [{ type: "text", text }] } });
+  const result = { type: "result", subtype: "success", is_error: false, result: "", stop_reason: "end_turn", usage: {}, duration_ms: 1000 };
+  async function rig(script: object, o: { seed?: string[]; summarize?: Summarize } = {}) {
+    const dir = tmp(), seed = o.seed ?? ["alpha", "beta", "gamma"];
+    seed.forEach((t, i) => appendMessage(dir, newMsg(i, "note", t, new Date(2026, 9, 4, 9 + i))));
+    const f = fake(script);
+    const { chat } = await openChat(dir, { summarize: o.summarize ?? (async () => "a summary") });
+    const { seen, out } = collector(), system = writeSystemPrompt(dir), mcp = mcpConfig(dir);
+    const session = createSession({ chat, out, system, mcp });
+    return { chat, session, f, seen, system, mcp, kinds: () => chat.mem.root.slice(seed.length).map((m) => `${m.kind}: ${m.text}`) };
+  }
+
+  test("a turn: the view as it was before the message, then the message; all the model does is logged; the process is killed at the result", async () => {
+    const r = await rig({ processes: [[{ events: fixture("turn-tools") }]] });
+    const before = render(r.chat.mem);
+    r.session.input("hello");
+    await r.session.whenIdle();
+    expect(r.f.starts().length).toBe(1);
+    expect(r.f.starts()[0].argv).toEqual(masterArgs(r.system, r.mcp));
+    expect(r.f.messages()).toEqual([[{ type: "text", text: before }, { type: "text", text: "hello" }]]); // view first, no cache marks
+    expect(before).not.toContain("hello");
+    expect(r.chat.mem.root.slice(3).map((m) => m.kind)).toEqual(["user", "tool", "echo", "tool", "echo", "tool", "echo", "talk"]);
+    expect(r.seen.infos.at(-1)).toMatch(/^\(4 in · 6,851 read · 7,205 write · 324 out · \d+\.\ds\)$/);
+    await until(() => !alive(r.f.starts()[0].pid), 2000);
+    expect(r.session.busy()).toBe(false);
+    r.chat.close();
+  });
+  test("messages queued together run as one call and are logged one by one", async () => {
+    const r = await rig({ processes: [[{ reply: "ok" }]] });
+    r.session.input("first");
+    r.session.input("second");
+    await r.session.whenIdle();
+    expect(r.f.messages().map((c) => c.at(-1).text)).toEqual(["first\n\nsecond"]);
+    expect(r.kinds()).toEqual(["user: first", "user: second"]);
+    r.chat.close();
+  });
+  test("a message sent while a tool runs goes to the running call and is logged as user", async () => {
+    const tool = { type: "assistant", message: { content: [{ type: "tool_use", id: "t1", name: "Bash", input: { command: "sleep 1" } }] } };
+    const done = { type: "user", message: { content: [{ type: "tool_result", tool_use_id: "t1", content: "done" }] } };
+    const r = await rig({ processes: [[{ events: [init, { $replay: true }, tool, { $wait: true }, done, { $replay: true }, said("all done"), result] }]] });
+    r.session.input("go");
+    await until(() => r.f.messages().length === 1);
+    r.session.input("also this");
+    await r.session.whenIdle();
+    expect(r.f.starts().length).toBe(1);
+    expect(r.kinds()).toEqual(["user: go", 'tool: Bash {"command":"sleep 1"}', "echo: done", "user: also this", "talk: all done"]);
+    r.chat.close();
+  });
+  test("a message that arrives too late is requeued and gets a fresh call with a new view", async () => {
+    const r = await rig({ processes: [
+      [{ events: [init, { $replay: true }, said("first answer"), { $wait: true }, result] }], // takes the second message off stdin, never replays it
+      [{ events: [init, { $replay: true }, said("second answer"), result] }],
+    ] });
+    r.session.input("one");
+    await until(() => r.f.messages().length === 1);
+    r.session.input("two");
+    await r.session.whenIdle();
+    expect(r.f.starts().length).toBe(2);
+    expect(r.kinds()).toEqual(["user: one", "talk: first answer", "user: two", "talk: second answer"]);
+    const second = r.f.messages()[2]; // process 0 got the opening message and "two", process 1 got its opening message
+    expect(second.at(-1).text).toBe("two");
+    expect(second[0].text).toContain("talk: first answer"); // the new view knows the first answer
+    expect(second[0].text).not.toContain("user: two"); // and was rendered before "two" was logged
+    r.chat.close();
+  });
+  test("cancel kills the call; what the user sent mid-run and was not taken is logged as it is", async () => {
+    const r = await rig({ processes: [[{ events: [init, { $replay: true }, said("thinking out loud"), { $wait: true }, { $hang: true }] }]] });
+    r.session.input("go");
+    await until(() => r.f.messages().length === 1);
+    r.session.input("never seen");
+    await until(() => r.f.messages().length === 2 && r.kinds().includes("talk: thinking out loud"));
+    r.session.cancel();
+    await r.session.whenIdle();
+    expect(r.kinds()).toEqual(["user: go", "talk: thinking out loud", "user: never seen"]);
+    expect(r.seen.infos.join("\n")).not.toContain("ended without a result");
+    await until(() => !alive(r.f.starts()[0].pid), 2000);
+    expect(r.f.starts().length).toBe(1);
+    r.chat.close();
+  });
+  test("a crash is reported, nothing is requeued, and the user's message stays in the log", async () => {
+    const r = await rig({ processes: [[{ exit: 1, stderr: "boom: not logged in" }]] });
+    r.session.input("go");
+    await r.session.whenIdle();
+    expect(r.f.starts().length).toBe(1);
+    expect(r.kinds()).toEqual(["user: go"]);
+    expect(r.seen.infos.some((i) => /ended without a result \(code 1\): boom: not logged in/.test(i))).toBe(true);
+    r.chat.close();
+  });
+  test("a refusal and an error result are reported, and only the user's messages are logged", async () => {
+    const r = await rig({ processes: [[{ reply: "", stop_reason: "refusal" }], [{ is_error: true, reply: "API Error: overloaded" }]] });
+    r.session.input("a");
+    await r.session.whenIdle();
+    r.session.input("b");
+    await r.session.whenIdle();
+    expect(r.kinds()).toEqual(["user: a", "user: b"]);
+    expect(r.seen.infos.some((i) => i.includes("stop_reason: refusal"))).toBe(true);
+    expect(r.seen.infos.some((i) => i.includes("error: API Error: overloaded"))).toBe(true);
+    r.chat.close();
+  });
+  test("the turn waits for unsummarized lines; a cancel while waiting leaves the message unanswered", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r)), long = ["x".repeat(2000)]; // not a free node: it needs a summary
+    const waits = await rig({ processes: [[{ reply: "ok" }]] }, { seed: long, summarize: async () => (await gate, "a summary") });
+    waits.session.input("go");
+    await sleep(50);
+    expect(waits.seen.infos).toContain("waiting for 1 summaries…");
+    expect(waits.f.starts().length).toBe(0);
+    release();
+    await waits.session.whenIdle();
+    expect(waits.f.starts().length).toBe(1);
+    expect(waits.f.messages()[0][0].text).toContain("0+1|a summary");
+    waits.chat.close();
+
+    const never = await rig({ processes: [[{ reply: "ok" }]] }, { seed: long, summarize: () => new Promise(() => {}) });
+    never.session.input("go");
+    await sleep(20);
+    never.session.cancel();
+    await never.session.whenIdle();
+    expect(never.kinds()).toEqual(["user: go"]);
+    expect(never.f.starts().length).toBe(0);
+    never.chat.close();
   });
 });

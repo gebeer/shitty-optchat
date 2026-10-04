@@ -60,14 +60,14 @@ function readStream<T>(dir: string, stream: string, ok: (r: any) => r is T, prob
 }
 
 // load the chat and fold the view; throws if the message ids are not 0, 1, 2, ...
-// `repair: false` for read-only callers (view, browse, mcp): they never write
-export function loadChat(dir: string, o: { budget?: number; repair?: boolean } = {}) {
+// `repair: false` for read-only callers (view, browse, mcp): they never write; `view: false` skips the fold
+export function loadChat(dir: string, o: { budget?: number; repair?: boolean; view?: boolean } = {}) {
   const problems: string[] = [], repair = o.repair ?? true;
   const mem: Mem = newMem(o.budget);
   mem.root = readStream(dir, "main", isMsg, problems, repair).sort((a, b) => a.i - b.i);
   mem.root.forEach((m, k) => { if (m.i !== k) throw new Error(`chat/main: expected message ${k}, found ${m.i}`); });
   for (const n of readStream(dir, "tree", isNode, problems, repair)) setNode(mem, { ...n, size: bytes(n.text) });
-  refold(mem);
+  if (o.view ?? true) refold(mem);
   return { mem, problems };
 }
 
