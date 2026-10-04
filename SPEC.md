@@ -88,7 +88,7 @@ overrides only where noted):
 Implement gist §2, §3, §4.1, §4.3, §5 and §6 **exactly**. Summary of the
 must-haves:
 
-- `main` record `{i, kind, text, size, date}`, `tree` record `{l, i, text, size}`,
+- `main` record `{i, kind, text, size, date, src?}` (`src: "optmem:<n>"` on imported notes), `tree` record `{l, i, text, size}`,
   one `write` plus `fsync` per line, files split by local day, ids global.
 - At load: skip and report non-JSON lines, and append a missing final `\n`.
 - Unix-socket lock for the process lifetime. A second process that can connect
@@ -546,22 +546,34 @@ inline JSON string built once (`mcpConfig(dir)`) that launches `bun src/cli.ts m
 - `optchat browse [out.html]`: one self-contained HTML page with the view,
   ROOT and each tree level, each entry with its range, time span and size
   (gist §10). Escape all text.
-- `optchat import-optmem [path]` (default `~/.optmem/memory/LOG.txt`): only
-  into an **empty** chat. LOG.txt has fixed-width 320-byte records, each
+- `optchat import-optmem [path]` (default `~/.optmem/memory/LOG.txt`): appends
+  the notes OptMem gained since the last import (other agents write there too);
+  a rerun adds nothing. Manual only: it takes the lock, so the REPL must be closed. LOG.txt has fixed-width 320-byte records, each
   `#<n> <YYYY-MM-DD> <text>` padded with spaces, ending in `\n`. Import record
   `n` as message `i = n`, kind `note`, text trimmed, date = that day at
   **12:00 local time** (a fixed time, so imported times are recognizably
   synthetic). Refuse if the ids aren't contiguous from 0.
+- Incremental import (as built): each imported note gets
+  `src: "optmem:<n>"` and the next free message id. The cursor is the highest
+  tagged `n` + 1; a chat without tags (the first import) counts its leading
+  `note` messages, which are OptMem `0…k-1`. Only whole 320-byte records are
+  read, so a record OptMem is still writing waits for the next run. Before
+  appending, the stored text of note `cursor-1` must equal that LOG.txt record,
+  and the log must hold at least `cursor` records: else an error and nothing
+  written (a replaced or reset log). Dates stay the note's own day (option A),
+  so message dates can go backwards; the startup header's "last" is the newest
+  date, not the last message. A non-empty import commits the data dir. The
+  `note` kind in the prompts reads "memories from OptMem, written by other
+  agents too". One-way: OptChat never writes to OptMem.
 - As built: `view`, `browse` and `mcp` never write (`repair: false`). `browse`
   writes `./optchat.html` unless given a path. `import-optmem` parses the whole
-  file before writing anything (a bad file writes nothing), refuses a non-empty
-  chat, takes the lock, and builds the free nodes so the chat is readable at once.
+  file before writing anything (a bad file writes nothing), takes the lock, and builds the free nodes so the chat is readable at once.
   The real `LOG.txt` has 128 notes (2026-08-08 … 2026-10-04, 32 days, 123–280
   bytes each, ids contiguous from 0, 24 with non-ASCII text, so the padding is by
   bytes): 255 nodes, 173 free, 82 need the model.
 - `src/selfcheck.test.ts` (`bun test`): **few tests, only for real failure scenarios; no
   per-function suites; no mutation runs** (breaking code on purpose to test the tests).
-  No model calls. 17 tests, about 380 lines, ~1.1 s (it had 58, and 64 after step 5; the
+  No model calls. 20 tests, about 380 lines, ~1.1 s (it had 58, and 64 after step 5; the
   user asked for a lean suite; step 6 added one test). What is covered:
   - view and pump: the view-block cut points; the fit invariants over 1200 random
     messages (tiles `[0,T)`, under budget once parents exist, never splits, refold equals
@@ -876,7 +888,7 @@ Written at the end of step 4 and updated at the end of steps 5 and 6, so that a 
 | 5 prime | 240cfac (orphan fix), d2d2968 (proxy), ff3d093 | done, §6 as built, §14 F1–F6 |
 | 6 REPL | 4ac3180 | done, §10 as built, §14 R1–R7 (§16.7) |
 
-`bun test`: 17 tests in one file, ~1.1 s, no model calls (§10: the suite was trimmed after
+`bun test`: 20 tests in one file, ~1.1 s, no model calls (§10: the suite was trimmed after
 step 5; step 6 added the paste test). Commits 84bc1b5 and d9d69f6 (the step 4 handover),
 9f415f7 (the proxy bound to loopback), 7af5d59 (the step 5 handover), 8204193 and d20ad9c
 (the test trim and its temp-dir clean-up) are outside the steps. The tool is complete:
@@ -903,7 +915,7 @@ step 5; step 6 added the paste test). Commits 84bc1b5 and d9d69f6 (the step 4 ha
 | `usage.ts` | `logUsage` (one line per model call), `aggregate`, `isoWeek`, `hit`, `table` (`optchat stats`) |
 | `cli.ts` | no command: `repl(DIR)`; `view`, `stats`, `browse`, `import-optmem`, `mcp` |
 | `fake-claude.ts` | test double for `claude -p` (format in its header; exits on a closed stdin and on SIGTERM) |
-| `selfcheck.test.ts` | the 19 tests (§10) |
+| `selfcheck.test.ts` | the 20 tests (§10) |
 | `fixtures/` | `turn-tools.jsonl`, `turn-thinking.jsonl`: real master streams, sanitized |
 
 `prompts/`: `compact.txt` (gist §4.4 verbatim), `scale.txt` (512 bytes), `master.txt`,

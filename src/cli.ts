@@ -28,8 +28,8 @@ try {
   } else if (cmd === "mcp") { // started by claude through --mcp-config
     await serveMcp(DIR);
   } else if (cmd === "import-optmem") {
-    const mem = await importOptmem(DIR, arg);
-    console.log(`imported ${mem.root.length} notes into ${DIR}; ${mem.tree.size} free nodes built, ${mem.view.length} view lines`);
+    const { mem, added } = await importOptmem(DIR, arg);
+    console.log(`imported ${added} new notes into ${DIR}; ${mem.root.length} messages, ${mem.view.length} view lines`);
   } else if (!cmd) {
     await repl(DIR);
   } else {

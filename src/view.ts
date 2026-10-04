@@ -71,7 +71,7 @@ export function stats(mem: Mem, now = new Date()): string[] {
   const T = mem.root.length;
   if (!T) return ["0 messages"];
   const ago = (ms: number) => { const m = Math.floor(ms / 60_000); return m < 1 ? "just now" : m < 60 ? `${m}m ago` : m < 1440 ? `${Math.floor(m / 60)}h ago` : `${Math.floor(m / 1440)}d ago`; };
-  const last = new Date(mem.root[T - 1].date), size = mem.view.reduce((s, p) => s + partSize(mem, p), 0);
+  const last = new Date(Math.max(...mem.root.map((m) => Date.parse(m.date)))) /* imported notes keep their older day */, size = mem.view.reduce((s, p) => s + partSize(mem, p), 0);
   let pending = 0;
   for (let l = 0; 2 ** l <= T; l++) for (let i = 0; (i + 1) * 2 ** l <= T; i++) if (!built(mem, l, i)) pending++;
   const open = mem.view.filter((p) => !built(mem, p.l, p.i)).length, kb = (b: number) => (b / 1000).toFixed(1).replace(/\.0$/, "");

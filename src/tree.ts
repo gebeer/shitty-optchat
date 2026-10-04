@@ -4,7 +4,7 @@ import { NODE, VIEW } from "./config.ts";
 
 export type Kind = "user" | "talk" | "tool" | "echo" | "note";
 export const KINDS: readonly Kind[] = ["user", "talk", "tool", "echo", "note"];
-export type Msg = { i: number; kind: Kind; text: string; size: number; date: string };
+export type Msg = { i: number; kind: Kind; text: string; size: number; date: string; src?: string }; // src: "optmem:<n>" for imported notes
 export type Node = { l: number; i: number; text: string; size: number };
 export type Coord = { l: number; i: number }; // node (l, i) covers messages [i·2^l, (i+1)·2^l)
 export type Mem = {

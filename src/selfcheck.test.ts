@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname } from "node:path";
 import { openChat } from "./chat.ts";
 import { createPump } from "./compactor.ts";
-import { parseOptmem } from "./import.ts";
+import { importOptmem, parseOptmem } from "./import.ts";
 import { createKeys } from "./repl.ts";
 import { acquireLock, appendMessage, loadChat, newMsg } from "./store.ts";
 import { makeSummarizer } from "./summarize.ts";
@@ -215,6 +215,24 @@ test("LOG.txt: fixed-width records give ids, 12:00 local dates and trimmed text,
   expect(notes.map((n) => n.n)).toEqual([0, 1, 2, 3, 4]);
   notes.forEach((n, k) => expect([dayOf(n.date), n.date.getHours(), n.date.getMinutes()]).toEqual([days[k], 12, 0]));
   expect(() => parseOptmem(rec(0, "2026-08-08", "a") + rec(2, "2026-08-08", "c"))).toThrow(/contiguous from 0, expected #1, found #2/);
+});
+
+test("import-optmem appends only new notes: a rerun adds nothing, a partial record waits, a changed log is refused", async () => {
+  const rec = (n: number, text: string) => { const head = `#${n} 2026-10-0${1 + (n % 3)} `; return head + text + " ".repeat(319 - bytes(head + text)) + "\n"; };
+  const dir = tmp(), log = `${dir}/LOG.txt`;
+  writeFileSync(log, rec(0, "a") + rec(1, "b"));
+  // a chat from before the tags: the first import made notes 0, 1 into messages 0, 1, then the chat went on
+  [newMsg(0, "note", "a"), newMsg(1, "note", "b"), newMsg(2, "user", "hi")].forEach((m) => appendMessage(dir, m));
+  expect((await importOptmem(dir, log)).added).toBe(0);
+  appendFileSync(log, rec(2, "c") + rec(3, "d") + rec(4, "e").slice(0, 100)); // OptMem is still writing #4
+  const { mem, added } = await importOptmem(dir, log);
+  expect(added).toBe(2);
+  expect(mem.root.slice(3).map((m) => [m.i, m.kind, m.text, m.src, dayOf(new Date(m.date))])).toEqual([[3, "note", "c", "optmem:2", "2026-10-03"], [4, "note", "d", "optmem:3", "2026-10-01"]]);
+  expect((await importOptmem(dir, log)).added).toBe(0);
+  writeFileSync(log, rec(0, "a") + rec(1, "b") + rec(2, "c") + rec(3, "other") + rec(4, "e"));
+  await expect(importOptmem(dir, log)).rejects.toThrow(/note #3 differs/);
+  expect(loadChat(dir).mem.root.length).toBe(5);
+  rmSync(dir, { recursive: true });
 });
 
 // ---- the turn: recorded streams, then fake claude ---------------------------------------------------------------------
