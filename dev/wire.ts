@@ -9,7 +9,8 @@ const recs = [...byId.values()].filter((r) => r.req?.messages);
 const blk = (b: any) => `${b.type}:${b.len}${b.cc ? "*" : ""}`;
 for (const r of recs.slice(-(Number(last) || recs.length))) {
   const q = r.req, u = r.usage;
-  console.log(`#${r.id} ${q.model} status=${r.status ?? "pending"}${u ? ` in=${u.input_tokens} read=${u.cache_read_input_tokens} write=${u.cache_creation_input_tokens} out=${u.output_tokens}` : ""}`);
+  console.log(`#${r.id} ${q.model} status=${r.status ?? "pending"}${r.aborted ? " ABORTED" : ""}${u ? ` in=${u.input_tokens} read=${u.cache_read_input_tokens} write=${u.cache_creation_input_tokens} out=${u.output_tokens}` : ""}`);
+  if (r.rl && Object.keys(r.rl).length) console.log(`  ratelimit: ${Object.entries(r.rl).map(([k, v]) => `${k.replace("anthropic-ratelimit-", "")}=${v}`).join(" ")}`);
   console.log(`  system: ${q.system.map(blk).join(" ")}   tools: ${q.tools.map((t: any) => t.name).join(",") || "-"}`);
   for (const m of q.messages) {
     const b = m.blocks;

@@ -472,14 +472,18 @@ inline JSON string built once (`mcpConfig(dir)`) that launches `bun src/cli.ts m
   - the event→log mapping against a recorded stream-json fixture;
   - the compactor calls and the whole turn against a fake `claude`
     (`src/fake-claude.ts`, §16.4), and the MCP server over stdio.
-- `dev/wire-proxy.ts`: a logging pass-through for `ANTHROPIC_BASE_URL`. It
-  records only payload structure (block lengths, hashes, cache marks) and
-  usage, never headers: a `req` record when the request arrives (so a killed
-  priming request still leaves its shape) and a `res` record with status and
-  usage when the response ends (late for killed requests, see §13). Use it in
-  Phase 0 and to check cache behavior later; `bun dev/wire.ts <log>` prints it
-  readably. Logs can contain short text heads: keep them out of git (`.gitignore`
-  covers its default output).
+- `dev/wire-proxy.ts`: a logging pass-through for `ANTHROPIC_BASE_URL`, loopback only.
+  It records only payload structure (block lengths, hashes, cache marks), usage and
+  the `anthropic-ratelimit-*` response headers; **no other header is ever logged**
+  (no auth, no ids). A `req` record when the request arrives (so a killed priming
+  request still leaves its shape) and a `res` record with status, usage, `rl` (the
+  rate-limit headers) and `aborted` when the response ends. When the client goes
+  away (a priming call killed at `message_start`) the proxy cancels the upstream
+  request too, as a direct connection would; it used to keep reading it to the end,
+  which made every "killed" request of Phase 0 a completed one upstream (§14 F2).
+  Use it to check cache behavior; `bun dev/wire.ts <log>` prints it readably. Logs
+  can contain short text heads: keep them out of git (`.gitignore` covers its
+  default output).
 
 ## 11. Deviations from the gist (keep this list current)
 

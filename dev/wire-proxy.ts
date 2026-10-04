@@ -1,8 +1,11 @@
 // Logging pass-through for ANTHROPIC_BASE_URL. Logs ONLY payload structure
-// (block types, lengths, hashes, cache_control positions) and response usage.
-// Never logs request/response headers. Usage: LOG=file.jsonl PORT=8399 bun proxy.ts
+// (block types, lengths, hashes, cache_control positions), response usage and the
+// anthropic-ratelimit-* response headers. No other header is ever logged (no auth, no ids).
+// Usage: LOG=file.jsonl PORT=8399 bun dev/wire-proxy.ts
 // Two records per request, same id: {phase:"req", ts, path, req:<shape>} on arrival, then
-// {phase:"res", tsEnd, status, usage, error} when the response ends (late, or never, if the client died).
+// {phase:"res", tsEnd, status, usage, error, rl, aborted?} when the response ends. If the client
+// goes away first (a killed priming call), the upstream request is cancelled too and `aborted` is
+// true; `usage` is then what had arrived (message_start carries the input usage).
 import { appendFileSync, writeFileSync } from "fs";
 import { createHash } from "crypto";
 
@@ -54,18 +57,25 @@ Bun.serve({
     const headers = new Headers(req.headers);
     headers.delete("host");
     headers.set("accept-encoding", "identity");
-    const res = await fetch(UP + url.pathname + url.search, { method: req.method, headers, body: raw.byteLength ? raw : undefined, decompress: true } as any);
+    const ac = new AbortController();
+    const res = await fetch(UP + url.pathname + url.search, { method: req.method, headers, body: raw.byteLength ? raw : undefined, decompress: true, signal: ac.signal } as any);
     rec.status = res.status;
+    // ONLY the anthropic-ratelimit-* response headers are logged (the billing question of SPEC §14), never any other header
+    rec.rl = Object.fromEntries([...res.headers].filter(([k]) => k.startsWith("anthropic-ratelimit-")));
     const out = new Headers(res.headers);
     out.delete("content-encoding");
     out.delete("content-length");
-    const done = () => appendFileSync(LOG, JSON.stringify({ id, phase: "res", tsEnd: Date.now(), status: rec.status, usage: rec.usage, error: rec.error }) + "\n");
+    const done = (aborted?: true) => appendFileSync(LOG, JSON.stringify({ id, phase: "res", tsEnd: Date.now(), status: rec.status, usage: rec.usage, error: rec.error, rl: rec.rl, aborted }) + "\n");
     if (!res.body) { done(); return new Response(null, { status: res.status, headers: out }); }
-    const [a, b] = res.body.tee();
-    (async () => {
-      const txt = await new Response(b).text();
+    // Relay the stream and keep a copy to read the usage from. When the client goes away the upstream request is
+    // cancelled too, as it is on a direct connection: a tee() would keep reading to the end and hide what a kill does.
+    const reader = res.body.getReader(), chunks: Uint8Array[] = [];
+    let ended = false;
+    const finish = (aborted?: true) => {
+      if (ended) return;
+      ended = true;
       const usage: any = {};
-      for (const line of txt.split("\n")) {
+      for (const line of Buffer.concat(chunks).toString().split("\n")) {
         if (!line.startsWith("data:") && !line.startsWith("{")) continue;
         try {
           const ev = JSON.parse(line.replace(/^data:\s*/, ""));
@@ -75,9 +85,24 @@ Bun.serve({
         } catch {}
       }
       rec.usage = usage;
-      done();
-    })();
-    return new Response(a, { status: res.status, headers: out });
+      done(aborted);
+    };
+    const body = new ReadableStream({
+      async pull(ctrl) {
+        try {
+          const { value, done: eof } = await reader.read();
+          if (eof) { ctrl.close(); finish(); return; }
+          chunks.push(value);
+          ctrl.enqueue(value);
+        } catch (e: any) {
+          rec.error ??= String(e?.message ?? e).slice(0, 300);
+          ctrl.error(e);
+          finish();
+        }
+      },
+      cancel() { ac.abort(); finish(true); },
+    });
+    return new Response(body, { status: res.status, headers: out });
   },
 });
 console.log("proxy up");
