@@ -23,8 +23,8 @@ OptChat is a chat that never ends. Its history is its memory. The memory is a bi
 Clone the repository and make a symlink to the entry point:
 
 ```sh
-git clone https://github.com/gebeer/optchat.git
-ln -s "$PWD/optchat/src/cli.ts" ~/bin/optchat
+git clone https://github.com/gebeer/shitty-optchat.git
+ln -s "$PWD/shitty-optchat/src/cli.ts" ~/bin/optchat
 ```
 
 Make sure that `~/bin` is in your `PATH`.
