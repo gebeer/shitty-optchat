@@ -366,9 +366,15 @@ tool list.
 ## 10. CLI, import, browse, checks
 
 - `optchat`: take the lock, load, fold the view, start the pump, **print the
-  view** (gist §10), then read lines from stdin. Plain output with no TUI
+  view** (gist §10), then read messages from stdin. Plain output with no TUI
   redraws, so the terminal scrollback works.
-  - While a turn runs, typed lines become mid-run messages (§5.2).
+  - **Multi-line input:** line-based reading would turn a pasted block into one
+    message per line. On a TTY, switch the terminal to bracketed paste mode
+    (`ESC[?2004h` at start; `ESC[?2004l` on exit and before suspending): text
+    between `ESC[200~` and `ESC[201~` stays ONE message with its newlines kept,
+    and Enter outside a paste sends the message. When stdin is not a TTY, each
+    line is a message.
+  - While a turn runs, typed messages become mid-run messages (§5.2).
   - While waiting in `settle`, show `waiting for N summaries…`.
   - Ctrl-C cancels the current wait or turn; a second Ctrl-C while idle exits.
 - `optchat view`: print the current view (read-only, no lock).
@@ -411,6 +417,7 @@ tool list.
 | D6 | Compactor runs with `DISABLE_PROMPT_CACHING=1` and the spec's own 4 marks | Retries are tiny, so losing Claude Code's rolling marks costs nothing, and the spec's layout caches the view prefix across calls [measured] |
 | D7 | The request carries Claude Code's fixed identity line and userEmail block before our content | Forced by Claude Code with OAuth; constant, so harmless for caching |
 | D8 | zoom/date via a stdio MCP server, not HTTP | Simpler; no subagents need to share it yet |
+| D9 | The master and the priming call run with `--permission-mode bypassPermissions`; `OPTCHAT_PERMISSION_MODE` overrides it (`MASTER_PERMISSION`, §2) | `claude -p` has nobody to answer permission prompts, and its default mode denies Bash redirects, writes and every MCP tool (§14 P4). The gist is silent on permissions. Approved by the user. |
 
 Out of scope for v1: gist §9 (spawn/tell/computer), importing old agent sessions
 other than OptMem notes, fail-closed handling of disk errors beyond what fsync
@@ -429,9 +436,11 @@ gives.
    per-call usage against §7's numbers through the stream-json `result` usage
    fields (`cache_read_input_tokens`, `cache_creation_input_tokens`).
 4. `mcp` (zoom/date), then `turn` without priming. End-to-end on a scratch data
-   dir.
+   dir. Also record how thinking blocks appear in stream-json (§14).
 5. `prime`. Confirm with the wire proxy or the `result` usage that step 1 reads
-   the view (read ≈ view tokens, write ≈ new message + env).
+   the view (read ≈ view tokens, write ≈ new message + env). Measure it at full
+   scale on opus against the no-priming baseline, and the billing of a killed
+   priming request (§14).
 6. REPL polish, git commit per turn, mid-run messages, Ctrl-C paths.
 
 Each step ends with `bun test` green. No step introduces new dependencies.
@@ -483,8 +492,8 @@ for leaks. Units: in / read / write = `input_tokens` / `cache_read_input_tokens`
 **Decisions taken because of Phase 0**
 
 - Master and priming: no `--safe-mode`; add `--permission-mode <MASTER_PERMISSION>`
-  (default `bypassPermissions`, §2). **This default is the user's call:** it gives the
-  model unrestricted Bash/Edit/Write on the machine. The tighter alternative,
+  (default `bypassPermissions`, §2). Approved by the user as D9 (§11). It gives the
+  model unrestricted Bash/Edit/Write on the machine; the tighter alternative,
   `dontAsk` plus an allowlist of the 10 tools, also worked in the probe.
 - One `masterArgs()` builds the argv for both the master and the priming call, so
   they can't drift apart.
@@ -492,7 +501,17 @@ for leaks. Units: in / read / write = `input_tokens` / `cache_read_input_tokens`
 - The turn code checks `system/init` for the `optchat` MCP server (§13).
 - `dev/wire-proxy.ts` now logs the request on arrival (see §10).
 
-**Not measured yet** (do it where the step needs it): priming at full scale on opus
-(step 5), whether a request killed at `message_start` is billed in full (assumed),
-thinking blocks and long tool loops in the stream (step 4), the meaning of
-`queued_turn_count` (not needed: the harness kills at the first `result`).
+**Scheduled measurements** (approved; each at its step, results go into this section):
+
+- Step 4: how thinking blocks appear in the stream-json output (events, with and
+  without `--include-partial-messages`), shown live and dimmed, never logged (§5.3);
+  long tool loops.
+- Step 5: priming at full scale on opus (a ~128 KB view): `read`/`write` per step of
+  the real turn against the no-priming baseline, cold and after a tail change.
+- Step 5: whether a request killed at `message_start` is billed. Per-request billing
+  isn't visible on a subscription, so the proxy logs **only** the
+  `anthropic-ratelimit-*` response headers (never auth or any other header), and
+  the utilization change of a killed priming request is compared with a completed
+  one. If that is inconclusive, say so; the §6 assumption (billed in full) stays.
+- Not needed: the meaning of `queued_turn_count` (the harness kills at the first
+  `result`).
