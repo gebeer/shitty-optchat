@@ -7,6 +7,7 @@ export const JOBS = 8;
 export const TRIES = 5;
 export const RETRY = 10_000; // ms
 export const CALL_TIMEOUT = 300_000; // ms: a compactor call with no result by then fails like any other
+export const KILL_GRACE = 5_000; // ms: a killed claude gets SIGTERM first, SIGKILL if it is still running after this
 export const CAP = 30_000;
 export const MARKS = [50_000, 80_000, 100_000];
 

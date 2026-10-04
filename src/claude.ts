@@ -1,7 +1,19 @@
 // `claude -p` child processes: stream-json user messages in, stream-json events out (SPEC §4).
 import { appendFileSync } from "node:fs";
+import { KILL_GRACE } from "./config.ts";
 
 export type Block = { type: "text"; text: string; cache_control?: { type: "ephemeral" } };
+
+// Every child that is still running. None may outlive the harness: an orphaned claude finishes its request on the
+// subscription and lingers, so each gets SIGTERM when the harness exits or is signalled (SIGKILL can't be caught).
+const live = new Set<{ kill(signal?: NodeJS.Signals): void }>();
+let hooked = false;
+function hook() {
+  if (hooked) return;
+  hooked = true;
+  process.on("exit", () => live.forEach((c) => c.kill()));
+  for (const [sig, no] of [["SIGINT", 2], ["SIGHUP", 1], ["SIGTERM", 15]] as const) process.on(sig, () => process.exit(128 + no)); // runs the exit hook
+}
 
 // the flags every call shares; callers add --mcp-config, --safe-mode, ...
 export const baseArgs = (model: string, effort: string, systemFile: string, tools: string) => [
@@ -17,6 +29,9 @@ export function spawnClaude(args: string[], env: Record<string, string> = {}, ta
     env: { ...process.env, CLAUDE_CODE_PROMPT_CACHE_TTL: "5m", ...env }, // 5m marks only: a 5m mark after a 1h one is a 400
     stdin: "pipe", stdout: "pipe", stderr: "pipe",
   });
+  hook();
+  live.add(child);
+  child.exited.then(() => live.delete(child));
   const stderr = new Response(child.stderr).text(); // drained, so the pipe never fills
   const reader = child.stdout.getReader(), dec = new TextDecoder();
   let buf = "";
@@ -46,7 +61,12 @@ export function spawnClaude(args: string[], env: Record<string, string> = {}, ta
       for (let e; (e = await this.next()); ) if (e.type === "result") return e;
       throw new Error(`claude exited (code ${await child.exited}) before its result: ${(await stderr).trim().slice(-300)}`);
     },
-    kill: () => child.kill(),
+    kill(grace = KILL_GRACE) { // SIGTERM, and SIGKILL if it is still there after `grace` ms
+      child.kill();
+      const t = setTimeout(() => child.kill("SIGKILL"), grace);
+      t.unref();
+      child.exited.then(() => clearTimeout(t));
+    },
     exited: child.exited,
     stderr: () => stderr,
   };

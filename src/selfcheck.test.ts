@@ -1,9 +1,10 @@
 // Selfcheck: no model calls. The compactor is a fake, the data dirs are temp dirs.
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, describe, expect, test } from "bun:test";
 import { appendFileSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { browseHtml } from "./browse.ts";
 import { openChat } from "./chat.ts";
+import { spawnClaude } from "./claude.ts";
 import { type Job, type Summarize, buildFree, createPump } from "./compactor.ts";
 import { CAP, MASTER_EFFORT, MASTER_MODEL, MASTER_PERMISSION, MASTER_TOOLS, NODE, TRIES } from "./config.ts";
 import { TOOLS, date, zoom } from "./mcp.ts";
@@ -23,17 +24,39 @@ const tmp = () => mkdtempSync(`${tmpdir()}/optchat-test-`);
 const mergeable = (mem: Mem) => mem.view.some((a, k) => { const b = mem.view[k + 1]; return b && a.l === b.l && a.i % 2 === 0 && b.i === a.i + 1 && built(mem, a.l + 1, a.i / 2); });
 
 const FAKE = `${import.meta.dir}/fake-claude.ts`;
+const NO_CLAUDE = "/bin/false"; // what OPTCHAT_CLAUDE is outside `fake()`: not even a stray, late spawn can start the real claude
+process.env["OPTCHAT_CLAUDE"] = NO_CLAUDE;
 const alive = (pid: number) => { try { return process.kill(pid, 0); } catch { return false; } };
+const logs: string[] = []; // the log of every fake() of the running test: it names the pid of each fake claude started
+const cleanups: (() => void)[] = []; // what a test started and has to stop: sessions, chats
 // a fake `claude` for the code under test (see fake-claude.ts for the script format)
 function fake(script: object) {
   const dir = tmp(), log = `${dir}/log.jsonl`;
   writeFileSync(log, "");
   writeFileSync(`${dir}/script.json`, JSON.stringify(script));
+  logs.push(log);
   Object.assign(process.env, { OPTCHAT_CLAUDE: FAKE, FAKE_CLAUDE_LOG: log, FAKE_CLAUDE_SCRIPT: `${dir}/script.json` });
   const entries = () => readFileSync(log, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
   return { starts: () => entries().filter((e) => e.argv), messages: () => entries().filter((e) => e.message).map((e) => e.message.message.content) };
 }
-afterEach(() => { for (const k of ["OPTCHAT_CLAUDE", "FAKE_CLAUDE_LOG", "FAKE_CLAUDE_SCRIPT"]) delete process.env[k]; });
+// No test leaves a child behind. First stop what the test started, then every fake it ran has to be gone: a leaked one is
+// killed here and fails the test (an orphaned fake once spun at 100% CPU for 11 minutes, SPEC §15).
+afterEach(async () => {
+  cleanups.splice(0).forEach((stop) => stop());
+  const leaked: number[] = [];
+  for (const log of logs.splice(0))
+    for (const { pid } of readFileSync(log, "utf8").split("\n").filter((l) => l.includes('"argv"')).map((l) => JSON.parse(l))) {
+      try { await until(() => !alive(pid), 2000); } catch { process.kill(pid, "SIGKILL"); leaked.push(pid); }
+    }
+  process.env["OPTCHAT_CLAUDE"] = NO_CLAUDE;
+  for (const k of ["FAKE_CLAUDE_LOG", "FAKE_CLAUDE_SCRIPT"]) delete process.env[k];
+  expect(leaked).toEqual([]);
+});
+// and none survives the run: every fake claude is a child of this process
+const fakes = () => Bun.spawnSync(["pgrep", "-P", String(process.pid), "-f", "fake-claude.ts"]).stdout.toString().trim().split("\n").filter(Boolean).map(Number);
+afterAll(async () => {
+  try { await until(() => fakes().length === 0, 2000); } catch { fakes().forEach((pid) => process.kill(pid, "SIGKILL")); throw new Error("a fake claude outlived the test run"); }
+});
 
 describe("tree", () => {
   test("id+n names a node by its first message and the messages it covers", () => {
@@ -666,6 +689,7 @@ describe("the turn (fake claude)", () => {
     const { chat } = await openChat(dir, { summarize: o.summarize ?? (async () => "a summary") });
     const { seen, out } = collector(), system = writeSystemPrompt(dir), mcp = mcpConfig(dir);
     const session = createSession({ chat, out, system, mcp });
+    cleanups.push(() => (session.stop(), chat.close()));
     return { chat, session, f, seen, system, mcp, kinds: () => chat.mem.root.slice(seed.length).map((m) => `${m.kind}: ${m.text}`) };
   }
 
@@ -778,5 +802,40 @@ describe("the turn (fake claude)", () => {
     expect(never.kinds()).toEqual(["user: go"]);
     expect(never.f.starts().length).toBe(0);
     never.chat.close();
+  });
+});
+
+describe("children", () => {
+  // A process that starts a claude through spawnClaude, then waits for a line on its stdin. Bun.spawn without `env` passes
+  // the environment the test run started with, not this process.env: pass it explicitly, or `claude` would be the real one.
+  const harness = (bin: string) => {
+    const code = `import { spawnClaude } from ${JSON.stringify(`${import.meta.dir}/claude.ts`)};
+      if (!process.env["OPTCHAT_CLAUDE"]) throw new Error("this would start the real claude");
+      spawnClaude(["-p"]).send([{ type: "text", text: "hi" }]);
+      for await (const _ of console) break;
+      process.exit(0);`;
+    return Bun.spawn([process.execPath, "-e", code], { env: { ...process.env, OPTCHAT_CLAUDE: bin }, stdin: "pipe", stdout: "ignore", stderr: "inherit" });
+  };
+  test("a harness that exits or is terminated takes its claude along, even one that never reads stdin", async () => {
+    const dir = tmp(), pidfile = `${dir}/pid`, deaf = `${dir}/deaf`;
+    writeFileSync(deaf, `#!/bin/sh\necho $$ > ${pidfile}\nexec sleep 60\n`, { mode: 0o755 }); // only a signal ends it
+    for (const end of ["exit", "SIGTERM"]) {
+      rmSync(pidfile, { force: true });
+      const h = harness(deaf);
+      await until(() => existsSync(pidfile) && readFileSync(pidfile, "utf8").trim() !== "");
+      const pid = Number(readFileSync(pidfile, "utf8"));
+      cleanups.push(() => alive(pid) && process.kill(pid, "SIGKILL"));
+      if (end === "exit") (h.stdin.write("go\n"), h.stdin.flush());
+      else h.kill("SIGTERM");
+      await h.exited;
+      await until(() => !alive(pid), 2000);
+    }
+  });
+  test("a hung fake claude ends when its harness is killed: its stdin closes, it does not spin as an orphan", async () => {
+    const f = fake([{ hang: true }]), h = harness(FAKE);
+    await until(() => f.messages().length === 1);
+    h.kill("SIGKILL"); // no exit hook runs
+    await h.exited;
+    await until(() => !alive(f.starts()[0].pid), 2000);
   });
 });

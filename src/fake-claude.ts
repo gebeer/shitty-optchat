@@ -6,11 +6,12 @@
 //                         {reply, stop_reason?}   a `result` with that text
 //                         {is_error, reply}       an error `result`
 //                         {exit, stderr}          die with that code, writing stderr
-//                         {hang}                  never answer
+//                         {hang}                  never answer (messages that arrive are still logged)
 //                         {events: [...]}         raw events printed in order; the pseudo events
 //                                                 {"$wait": true}    block until another user message arrives (it is logged)
 //                                                 {"$replay": true}  print the replay event of the latest message
-//                                                 {"$hang": true}    never go on
+//                                                 {"$hang": true}    never go on, like {hang}
+// It exits when its stdin closes (also while hung) and on SIGTERM (the default action).
 import { appendFileSync, readFileSync } from "node:fs";
 
 const log = process.env.FAKE_CLAUDE_LOG!, all = JSON.parse(readFileSync(process.env.FAKE_CLAUDE_SCRIPT!, "utf8"));
@@ -29,16 +30,19 @@ const next = async () => {
     if (value.trim()) { put({ message: (last = JSON.parse(value)) }); return last; }
   }
 };
+// Never answers, but goes on reading stdin like a hung claude: a closed stdin (the parent is gone) ends the process.
+// A step that stops reading leaves a hung-up stdin unread, and bun's event loop then spins at 100% CPU, orphaned.
+const hang = async () => { while (await next()); process.exit(0); };
 
 for (let n = 0; await next(); n++) {
   const s = script[Math.min(n, script.length - 1)];
   if (s.exit !== undefined) (process.stderr.write(s.stderr ?? ""), process.exit(s.exit));
-  if (s.hang) await new Promise(() => {});
+  if (s.hang) await hang();
   if (s.events) {
     for (const e of s.events) {
       if (e.$wait) await next();
       else if (e.$replay) emit({ type: "user", isReplay: true, message: { role: "user", content: last.message.content } });
-      else if (e.$hang) await new Promise(() => {});
+      else if (e.$hang) await hang();
       else emit(e);
     }
     continue;

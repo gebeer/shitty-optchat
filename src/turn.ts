@@ -71,15 +71,15 @@ const usageLine = (r: any) => `(${n(r.usage?.input_tokens)} in · ${n(r.usage?.c
 
 export function createSession(o: { chat: Chat; out: Out; system: string; mcp: string; tap?: string }) {
   const { chat, out } = o, args = masterArgs(o.system, o.mcp), queue: string[] = [];
-  let call: Claude | null = null, sent: Sent[] = [], cancelled = false, abort: AbortController | null = null, loop: Promise<void> | null = null;
+  let call: Claude | null = null, sent: Sent[] = [], cancelled = false, stopped = false, abort: AbortController | null = null, loop: Promise<void> | null = null;
 
   async function ask(view: string[], text: string) {
     sent = [];
     const claude = (call = spawnClaude(args, {}, o.tap));
-    claude.send([...view.map((t): Block => ({ type: "text", text: t })), { type: "text", text }]); // the view, then the message: no marks (SPEC §5.1)
     const map = createMapper({ log: chat.log, out, sent });
     let result: any;
     try {
+      claude.send([...view.map((t): Block => ({ type: "text", text: t })), { type: "text", text }]); // the view, then the message: no marks (SPEC §5.1)
       for (let ev; (ev = await claude.next()); ) {
         map(ev);
         if (ev.type === "result") { result = ev; break; } // the first one ends the turn; killing stops a follow-up turn in the same session
@@ -126,11 +126,14 @@ export function createSession(o: { chat: Chat; out: Out; system: string; mcp: st
   return {
     // a message while a call runs goes to its stdin (claude takes it at the next tool boundary); otherwise it starts a turn
     input(text: string) {
+      if (stopped) return;
       if (call) { sent.push({ text, taken: false }); call.send([{ type: "text", text }]); return; }
       queue.push(text);
       loop ??= turn().finally(() => (loop = null));
     },
     cancel() { cancelled = true; abort?.abort(); call?.kill(); },
+    // the end of the session (the REPL exiting): cancel what runs, take no more input
+    stop() { stopped = true; this.cancel(); },
     whenIdle: () => loop ?? Promise.resolve(),
     busy: () => loop !== null,
   };

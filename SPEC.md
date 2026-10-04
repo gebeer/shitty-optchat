@@ -250,7 +250,14 @@ they are logged as unanswered `user` messages (requeueing after a crash would lo
 forever). A crash, a failed spawn, an `is_error` result and a refusal are printed
 with `out.info`, never retried; the user's message is already in the log. After each
 call a dim usage line is printed from `result.usage`. The session takes an `Out`
-(`{text, thinking, info}`); the REPL provides it.
+(`{text, thinking, info}`); the REPL provides it. `stop()` is the end of the session
+(cancel what runs, take no more input).
+
+**Children never outlive the harness** (`claude.ts`): every running `claude -p` is
+registered; on exit and on SIGINT/SIGTERM/SIGHUP each gets SIGTERM, and `kill()` sends
+SIGKILL when a child is still there after `KILL_GRACE` (5 s). The harness's own SIGKILL
+can't be hooked: the children then end when their stdin closes (the fake `claude` does;
+a real one is not measured). Every spawn site kills in a `finally`.
 
 ### 5.3 Event → log mapping
 
@@ -654,7 +661,10 @@ session `claude-e6` (Herdr pane `wR:p1`); the build session is `optchat-impl` (p
   with the Edit/Write tools, not a heredoc. `rm -rf` asks for confirmation: reuse
   scratch dirs or take fresh names; tests delete only their own temp dirs, from inside
   bun. `pkill -f <pattern>` kills your own shell when the pattern is in its command
-  line: kill by PID (`ss -ltnp | grep :8399`). This machine's shell and Claude Code
+  line: kill by PID (`ss -ltnp | grep :8399`). `Bun.spawn` without `env` passes the
+  environment the process *started* with, not a `process.env` changed since: pass `env:
+  { ...process.env, … }` (a test harness that skipped it would have started the real
+  `claude`). This machine's shell and Claude Code
   sessions export `CLAUDE_CODE_*`, `HERDR_*` and plugin dirs: measure with a scrubbed
   environment (§16.5).
 
@@ -729,7 +739,14 @@ OPTCHAT_DIR=<dir> bun src/cli.ts browse out.html
   `FAKE_CLAUDE_SCRIPT` and `FAKE_CLAUDE_LOG` and the script format are in the file's
   header (steps per message or per process, raw `events` with `$wait`/`$replay`/`$hang`,
   `exit`, `hang`). Pass a custom `summarize` to `openChat` when a test must not spawn
-  compactor calls.
+  compactor calls. The fake keeps reading stdin even while it hangs and exits when stdin
+  closes (and on SIGTERM): a hung fake that doesn't read stdin spins at 100% CPU once its
+  parent is gone (an orphaned one ran for 11 minutes). Outside `fake()` the tests point
+  `OPTCHAT_CLAUDE` at `/bin/false`, so a stray spawn can't start the real `claude`.
+- No test leaves a child behind: `afterEach` stops what the test started (`cleanups`:
+  sessions, chats), then every fake named in the test's logs must be dead (a leaked one is
+  killed and fails the test), and `afterAll` checks that no `fake-claude.ts` is left among
+  the run's children.
 - `src/fixtures/*.jsonl` are real master streams (a turn with MCP and Bash; a thinking
   block). To record one: `createSession({ …, tap: file })` or `spawnClaude(args, env,
   tap)` writes every raw stdout line; replace the `system/init` paths and plugin lists
