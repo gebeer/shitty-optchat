@@ -104,7 +104,7 @@ must-haves:
 Write the tree/view logic as **pure functions** over in-memory arrays, so
 `src/selfcheck.test.ts` can drive them with a fake compactor. See §10.
 
-**As built** (decisions the code made; the tests pin them):
+**As built** (decisions the code made; only the failure scenarios listed in §10 are tested):
 
 - Free nodes are written to `chat/tree` like any other node, so readers and the MCP
   server need no free-node logic. `buildFree` builds them (bottom-up, no JOBS slot,
@@ -117,7 +117,7 @@ Write the tree/view logic as **pure functions** over in-memory arrays, so
   fold (the MCP server does).
 - View size = the sum of the node text bytes (no `id+n|` prefix). Ties in `due` go to
   the leftmost pair. `refold` uses `T = i+1` at each step with the *final* tree, so it
-  equals the live fold only when the compactor kept up (the selfcheck asserts that case).
+  equals the live fold only when the compactor kept up (the fit-invariants test asserts that case).
 - Dates: `date` is ISO UTC; a message's file is its local day; `localTime()` formats
   `YYYY-MM-DD HH:MM` local (what `date(id)` returns).
 - The pump builds a job's context snapshot synchronously when it decides to start the
@@ -412,8 +412,8 @@ goes into the 10 s retry loop.
 
 **SCALE:** the gist requires "a realistic summary line of exactly 512 bytes".
 Write one by hand into `prompts/scale.txt`: dense, multi-item, tagged
-`user:`/`talk:`/`tool:`/`echo:`, about a plausible coding session. Assert in
-`selfcheck` that it is exactly 512 UTF-8 bytes with no trailing newline.
+`user:`/`talk:`/`tool:`/`echo:`, about a plausible coding session. It must stay
+exactly 512 UTF-8 bytes with no trailing newline (`wc -c prompts/scale.txt`; no test checks it).
 
 ## 8. Prompts
 
@@ -491,18 +491,27 @@ inline JSON string built once (`mcpConfig(dir)`) that launches `bun src/cli.ts m
   The real `LOG.txt` has 128 notes (2026-08-08 … 2026-10-04, 32 days, 123–280
   bytes each, ids contiguous from 0, 24 with non-ASCII text, so the padding is by
   bytes): 255 nodes, 173 free, 82 need the model.
-- `src/selfcheck.test.ts` (`bun test`), with no model calls:
-  - tree addressing, free nodes;
-  - pump rule-3 ordering with a fake async compactor;
-  - the fit invariants: view tiles `[0,T)`, under budget once parents exist,
-    never splits, refold equals live fold;
-  - torn-line recovery;
-  - `cap()`;
-  - SCALE is 512 bytes;
-  - the view-block split points;
-  - the event→log mapping against a recorded stream-json fixture;
-  - the compactor calls and the whole turn against a fake `claude`
-    (`src/fake-claude.ts`, §16.4), and the MCP server over stdio.
+- `src/selfcheck.test.ts` (`bun test`): **few tests, only for real failure scenarios; no
+  per-function suites; no mutation runs** (breaking code on purpose to test the tests).
+  No model calls. 16 tests, about 360 lines, ~1.1 s (it had 58, and 64 after step 5; the
+  user asked for a lean suite). What is covered:
+  - view and pump: the view-block cut points; the fit invariants over 1200 random
+    messages (tiles `[0,T)`, under budget once parents exist, never splits, refold equals
+    the live fold); pump rule 3 (messages in order, merges alongside, at most `JOBS`);
+  - compactor: one failure test, end to end: a hung call times out, is reported once,
+    and the node is retried and built (real summarizer, fake `claude`, real pump);
+  - store: a torn last line; the lock (live owner, stale socket); import: the `LOG.txt` parse;
+  - the turn: the two recorded real streams (tools, thinking) through the event → log
+    mapping; a late message that is requeued; a cancel that keeps the message unanswered;
+  - priming: the flags and blocks equal the turn's, the background priming runs once; a
+    failing priming is reported once; a cancel during priming;
+  - children: a harness that exits, is terminated or is killed leaves no `claude` behind;
+    every test reaps its children and no fake survives the run (§16.4).
+
+  Left untested on purpose, because they restated the code or were low risk: exact flags
+  and prompt files, the tool descriptions, the MCP protocol, the CLI end to end, `browse`,
+  per-error-type matrices, `cap()`. Add a test only for a failure that has happened or
+  plausibly will, and don't let the suite grow back.
 - `dev/wire-proxy.ts`: a logging pass-through for `ANTHROPIC_BASE_URL`, loopback only.
   It records only payload structure (block lengths, hashes, cache marks), usage and
   the `anthropic-ratelimit-*` response headers; **no other header is ever logged**
@@ -694,6 +703,8 @@ session `claude-e6` (Herdr pane `wR:p1`); the build session is `optchat-impl` (p
   conventional commit (or a few) per completed step; stage files by path, never
   `git add -A` over scratch output. The first commit was the pre-existing
   SPEC/docs/dev files. No attribution trailer is configured.
+- **Tests:** few tests, only real failure scenarios; no per-function suites; no mutation
+  runs (§10). Step 6 adds a test only for a failure it actually finds.
 - **Reporting:** a short status after Phase 0 and after each build step: what works,
   measured usage where relevant, open issues. Send it with `SendMessage` to `claude-e6`
   (find the orchestrator with `herdr pane get wR:p1` and `ListAgents`) while work goes
@@ -729,7 +740,7 @@ one after `/compact`) can go on from this file and `git log` alone.
 
 1. Read this file fully, then `docs/optchat-gist.md` (the base spec; this file lists every
    deviation from it).
-2. `git log --oneline` and `bun test` (expect 64 passing).
+2. `git log --oneline` and `bun test` (expect 16 passing).
 3. Do not start step 6 until the user says so (§15, Gate).
 4. If something blocks, ask the orchestrator (`claude-e6`) with `SendMessage`.
 
@@ -745,9 +756,10 @@ one after `/compact`) can go on from this file and `git log` alone.
 | 5 prime | 240cfac (orphan fix), d2d2968 (proxy), ff3d093 | done, §6 as built, §14 F1–F6 |
 | 6 REPL polish | – | **waiting for the user's go-ahead** (§16.7) |
 
-`bun test`: 64 tests in one file, ~1.4 s, no model calls. Commits 84bc1b5 and d9d69f6 (the
-step 4 handover) and 9f415f7 (the proxy bound to loopback) are outside the steps. The
-REPL does not exist yet: `optchat` without a command prints the usage.
+`bun test`: 16 tests in one file, ~1.1 s, no model calls (§10: the suite was trimmed after
+step 5). Commits 84bc1b5 and d9d69f6 (the step 4 handover) and 9f415f7 (the proxy bound to
+loopback) are outside the steps. The REPL does not exist yet: `optchat` without a command
+prints the usage.
 
 ### 16.2 Code map (`src/`)
 
@@ -767,11 +779,11 @@ REPL does not exist yet: `optchat` without a command prints the usage.
 | `import.ts`, `browse.ts` | `parseOptmem`/`importOptmem`; `browseHtml` |
 | `cli.ts` | `view`, `browse`, `import-optmem`, `mcp` (the REPL is missing) |
 | `fake-claude.ts` | test double for `claude -p` (format in its header; exits on a closed stdin and on SIGTERM) |
-| `selfcheck.test.ts` | every test |
+| `selfcheck.test.ts` | the 16 tests (§10) |
 | `fixtures/` | `turn-tools.jsonl`, `turn-thinking.jsonl`: real master streams, sanitized |
 
 `prompts/`: `compact.txt` (gist §4.4 verbatim), `scale.txt` (512 bytes), `master.txt`,
-`view_doc.txt`; the selfcheck re-derives each from the gist. `dev/`: `wire-proxy.ts`, `wire.ts`.
+`view_doc.txt`: each is derived from the gist by hand (no test re-derives them). `dev/`: `wire-proxy.ts`, `wire.ts`.
 
 ### 16.3 Running things
 
@@ -804,9 +816,8 @@ OPTCHAT_DIR=<dir> bun src/cli.ts browse out.html
   block). To record one: `createSession({ …, tap: file })` or `spawnClaude(args, env,
   tap)` writes every raw stdout line; replace the `system/init` paths and plugin lists
   and anything personal before committing.
-- Mutation checks (copy `src`, `prompts`, `docs` to a scratch dir, break one rule,
-  expect a failure) were done after steps 1, 3 and 4 and every mutant was caught.
-  They are manual.
+- No mutation runs (the user stopped them): don't break code on purpose to test the tests.
+  They were done by hand after steps 1, 3 and 4 and every mutant was caught then.
 
 ### 16.5 Measurement recipe (the scripts used so far were scratch files, not in git)
 
