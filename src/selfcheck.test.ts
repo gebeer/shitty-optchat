@@ -6,6 +6,7 @@ import { dirname } from "node:path";
 import { openChat } from "./chat.ts";
 import { createPump } from "./compactor.ts";
 import { parseOptmem } from "./import.ts";
+import { createKeys } from "./repl.ts";
 import { acquireLock, appendMessage, loadChat, newMsg } from "./store.ts";
 import { makeSummarizer } from "./summarize.ts";
 import { type Mem, built, bytes, dayOf, getNode, label, newMem, span } from "./tree.ts";
@@ -365,4 +366,18 @@ test("a hung fake claude ends when its harness is killed: its stdin closes, it d
   h.kill("SIGKILL"); // no exit hook runs
   await h.exited;
   await until(() => !alive(f.starts()[0].pid), 2000);
+});
+
+// ---- the terminal input -----------------------------------------------------------------------------------------------
+
+test("a bracketed paste is ONE message wherever the terminal cuts its chunks (markers, CR, CRLF); Enter outside a paste sends", () => {
+  const input = "\x1b[A\x1b[200~alpha\r\nbeta\rgamma\nπ\x1b[201~\rnext\r"; // an arrow key, a paste with every kind of newline, Enter, a typed line
+  const every = Array.from({ length: input.length - 1 }, (_, k) => k + 1);
+  for (const cuts of [[], ...every.map((k) => [k]), every]) { // whole, cut once anywhere, cut everywhere
+    const sent: string[] = [];
+    let line = "";
+    const feed = createKeys({ text: (s) => (line += s), key: (k) => { if (k === "enter") { sent.push(line); line = ""; } } });
+    [0, ...cuts].forEach((from, k, all) => feed(input.slice(from, all[k + 1])));
+    expect(sent).toEqual(["alpha\nbeta\ngamma\nπ", "next"]);
+  }
 });

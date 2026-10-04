@@ -1,10 +1,11 @@
 #!/usr/bin/env bun
-// optchat: the harness and its commands. The REPL (no command) comes in a later step.
+// optchat: no command starts the chat (repl.ts); the commands below are one-shot.
 import { writeFileSync } from "node:fs";
 import { browseHtml } from "./browse.ts";
 import { DIR } from "./config.ts";
 import { importOptmem } from "./import.ts";
 import { serveMcp } from "./mcp.ts";
+import { repl } from "./repl.ts";
 import { loadChat } from "./store.ts";
 import { render } from "./view.ts";
 
@@ -24,9 +25,11 @@ try {
   } else if (cmd === "import-optmem") {
     const mem = await importOptmem(DIR, arg);
     console.log(`imported ${mem.root.length} notes into ${DIR}; ${mem.tree.size} free nodes built, ${mem.view.length} view lines`);
+  } else if (!cmd) {
+    await repl(DIR);
   } else {
-    console.error("usage: optchat view | browse [out.html] | import-optmem [LOG.txt] | mcp   (data dir: $OPTCHAT_DIR or ~/.optchat)");
-    process.exit(cmd ? 2 : 0);
+    console.error("usage: optchat [view | browse [out.html] | import-optmem [LOG.txt] | mcp]   (no command: the chat; data dir: $OPTCHAT_DIR or ~/.optchat)");
+    process.exit(cmd === "--help" || cmd === "-h" ? 0 : 2);
   }
 } catch (e: any) {
   console.error(`optchat: ${e.message}`);

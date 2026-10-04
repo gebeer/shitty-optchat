@@ -8,7 +8,7 @@ export type Block = { type: "text"; text: string; cache_control?: { type: "ephem
 // subscription and lingers, so each gets SIGTERM when the harness exits or is signalled (SIGKILL can't be caught).
 const live = new Set<{ kill(signal?: NodeJS.Signals): void }>();
 let hooked = false;
-function hook() {
+export function reapChildren() { // armed by the first spawn; the REPL arms it at start, so a signal at any time exits cleanly
   if (hooked) return;
   hooked = true;
   process.on("exit", () => live.forEach((c) => c.kill()));
@@ -29,7 +29,7 @@ export function spawnClaude(args: string[], env: Record<string, string> = {}, ta
     env: { ...process.env, CLAUDE_CODE_PROMPT_CACHE_TTL: "5m", ...env }, // 5m marks only: a 5m mark after a 1h one is a 400
     stdin: "pipe", stdout: "pipe", stderr: "pipe",
   });
-  hook();
+  reapChildren();
   live.add(child);
   child.exited.then(() => live.delete(child));
   const stderr = new Response(child.stderr).text(); // drained, so the pipe never fills

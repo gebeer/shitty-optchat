@@ -70,8 +70,9 @@ export function createMapper(o: { log: (kind: Kind, text: string) => void; out: 
 const n = (x: number) => (x ?? 0).toLocaleString("en-US");
 const usageLine = (r: any) => `(${n(r.usage?.input_tokens)} in · ${n(r.usage?.cache_read_input_tokens)} read · ${n(r.usage?.cache_creation_input_tokens)} write · ${n(r.usage?.output_tokens)} out · ${((r.duration_ms ?? 0) / 1000).toFixed(1)}s)`;
 
-// `prime`: SPEC §6, on by default; `false` runs the turns without it, `idleMs` is the debounce of the background priming
-export function createSession(o: { chat: Chat; out: Out; system: string; mcp: string; tap?: string; prime?: { idleMs: number } | false }) {
+// `prime`: SPEC §6, on by default; `false` runs the turns without it, `idleMs` is the debounce of the background priming.
+// `onIdle`: called each time a turn loop ends (the REPL commits the data dir and shows the prompt there)
+export function createSession(o: { chat: Chat; out: Out; system: string; mcp: string; tap?: string; prime?: { idleMs: number } | false; onIdle?: () => void }) {
   const { chat, out } = o, args = masterArgs(o.system, o.mcp), queue: string[] = [];
   const primer = o.prime === false ? null : createPrimer({ args, report: (m) => out.info(m) }), idleMs = (o.prime || { idleMs: PRIME_IDLE }).idleMs;
   let call: Claude | null = null, sent: Sent[] = [], cancelled = false, stopped = false, abort: AbortController | null = null, loop: Promise<void> | null = null;
@@ -119,6 +120,7 @@ export function createSession(o: { chat: Chat; out: Out; system: string; mcp: st
     try {
       while (queue.length) {
         const ac = (abort = new AbortController());
+        if (stopped) ac.abort(); // stop() came while the last call was ending: no new call, the queued messages stay in the log
         cancelled = false;
         const waiting = chat.mem.view.filter((p) => !built(chat.mem, p.l, p.i)).length;
         if (waiting) out.info(`waiting for ${waiting} summaries…`);
@@ -149,12 +151,11 @@ export function createSession(o: { chat: Chat; out: Out; system: string; mcp: st
       if (stopped) return;
       if (call) { sent.push({ text, taken: false }); call.send([{ type: "text", text }]); return; }
       queue.push(text);
-      loop ??= turn().finally(() => ((loop = null), idle()));
+      loop ??= turn().finally(() => ((loop = null), idle(), o.onIdle?.()));
     },
     cancel,
     // the end of the session (the REPL exiting): cancel what runs, take no more input, drop the background priming
     stop() { stopped = true; cancel(); clearTimeout(timer); chat.mem.waiters.delete(idle); primer?.stop(); },
     whenIdle: () => loop ?? Promise.resolve(),
-    busy: () => loop !== null,
   };
 }
