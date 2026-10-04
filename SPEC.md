@@ -55,6 +55,7 @@ prefer the hand-written loop, it is about 60 lines.
   chat/tree/YYYY-MM-DD.jsonl
   lock                       unix socket (gist §2)
   instructions.md            the user's own instructions (gist §7.2 "user's AGENTS.md")
+  usage.jsonl                one line per turn: {date, usage} from the `result` event (turn.ts)
 ```
 
 The data dir is a git repo of its own. The harness commits it after every turn
@@ -477,9 +478,15 @@ inline JSON string built once (`mcpConfig(dir)`) that launches `bun src/cli.ts m
   - Ctrl-C cancels the current wait or turn; a second Ctrl-C while idle exits.
   - **As built** (`repl.ts`, `persist.ts`; `cli.ts` calls `repl(DIR)` when there is no command).
     Start: lock (a second process exits 1 with `optchat: another optchat is already running
-    on <dir>`), the reaper of §5.2 armed, the load `problems` on stderr, the view, one dim
-    line (`optchat: N messages in DIR, master M[, K view lines still to summarize];
-    Ctrl-C cancels, Ctrl-D exits`) and the prompt `> `.
+    on <dir>`), the reaper of §5.2 armed, the load `problems` on stderr, the last 20 view
+    lines (a dim `… N earlier view lines (optchat view)` above them when there are more;
+    `optchat view` prints the whole view), a dim header of three lines from `stats(mem)`
+    in `view.ts` plus the REPL (`optchat: N messages, FIRST → LAST, last 2h ago`;
+    `view 41.6/128 KB (32%), L lines · P summaries pending[, K view lines unsummarized]`,
+    P counting every unbuilt node over a full pair, an upper bound on compactor calls;
+    `DIR · master M · Ctrl-C cancels, Ctrl-D exits`) and the prompt `> `. Each turn
+    appends `{date, usage}` (the `result` event's `usage`) to `usage.jsonl` in the data
+    dir, committed with the rest.
     - *Keys* (TTY, raw mode, bracketed paste; `createKeys`, a parser that copes with
       chunks cut anywhere): printable text, Enter sends, Backspace, Ctrl-U clears, Ctrl-D
       on an empty line exits, Ctrl-C, Ctrl-Z; arrows and every other sequence are dropped.
@@ -862,7 +869,7 @@ step 5; step 6 added the paste test). Commits 84bc1b5 and d9d69f6 (the step 4 ha
 |---|---|
 | `config.ts` | constants (gist §1, SPEC §2, `CALL_TIMEOUT`, `KILL_GRACE`, `PRIME_*`); env overrides `OPTCHAT_MODEL`, `OPTCHAT_PERMISSION_MODE`, `OPTCHAT_DIR` |
 | `tree.ts` | types `Msg`/`Node`/`Coord`/`Mem`; `id+n` addressing (`span`, `label`, `coords`); `freeText`, `ready`; `built`/`getNode`/`setNode` (first write wins); `dayOf`, `localTime` |
-| `view.ts` | `fit`, `addMessage`/`addNode`, `refold`, `render`, `cutBlocks`, `allBuilt`, `first`, `context`, `settle`, `PLACEHOLDER`, `flat` |
+| `view.ts` | `fit`, `addMessage`/`addNode`, `refold`, `render`, `cutBlocks`, `allBuilt`, `first`, `context`, `settle`, `PLACEHOLDER`, `flat`, `stats` (startup header) |
 | `store.ts` | JSONL append (write + fsync), `loadChat`, `newMsg`, `committer` (persist + `addNode`), `acquireLock` |
 | `compactor.ts` | the pump: `createPump`, `buildFree`, `makeJob`, the `Job`/`Summarize` types |
 | `summarize.ts` | the real `Summarize`: layout A `blocks()`, retries, `cut()`, `SCALE`, `COMPACT_FILE`, `onCall` usage hook |
@@ -1002,7 +1009,8 @@ Built as §10 "As built" says (`repl.ts`, `persist.ts`, small changes in `turn.t
   on a terminal write succeeding.
 - Not done on purpose, and not planned: line editing beyond Backspace and Ctrl-U (no
   cursor keys, no history), multi-row redraw of a wrapped input, a `--print` one-shot mode
-  (piping a line in is the one-shot), colours beyond dim, a status line.
+  (piping a line in is the one-shot), colours beyond dim, a status line. The startup
+  header (`stats`) is not one: it is printed once at start and never redrawn or updated.
 - For the user, when they install it: `ln -s ~/.claude/optchat/src/cli.ts ~/bin/optchat`
   (the file is executable and starts with `#!/usr/bin/env bun`; it works through the
   symlink). The first run on the imported LOG.txt chat starts ~82 sonnet calls at once

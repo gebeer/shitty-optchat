@@ -1,6 +1,6 @@
 // The turn (SPEC §5): one `claude -p` per user message, the rendered view as its input, and
 // everything it does logged as it happens. The event -> log mapping is a pure function.
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import type { Chat } from "./chat.ts";
 import { type Block, type Claude, baseArgs, spawnClaude } from "./claude.ts";
@@ -113,6 +113,8 @@ export function createSession(o: { chat: Chat; out: Out; system: string; mcp: st
     if (result.is_error) out.info(`error: ${clip(String(result.result), 300)}`);
     if (result.stop_reason === "refusal") out.info("the model refused this request (stop_reason: refusal)");
     out.info(usageLine(result));
+    try { appendFileSync(`${chat.dir}/usage.jsonl`, `${JSON.stringify({ date: new Date().toISOString(), usage: result.usage ?? null })}\n`); } // committed with the data dir
+    catch (e: any) { out.info(`usage.jsonl: ${e.message}`); }
     queue.unshift(...left); // not taken in time: a fresh call, with a new view
   }
 

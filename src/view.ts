@@ -1,7 +1,7 @@
 // The view (gist §5, §6): a list of tree nodes that tiles [0, T), changed only by
 // appending at the end and merging the most due pair. Pure functions over Mem.
 import { MARKS } from "./config.ts";
-import { type Coord, type Mem, type Msg, type Node, built, bytes, getNode, setNode, span } from "./tree.ts";
+import { type Coord, type Mem, type Msg, type Node, built, bytes, dayOf, getNode, setNode, span } from "./tree.ts";
 
 export const PLACEHOLDER = "(not summarized yet: zoom it)"; // display and fail-safe only, no call ever sees it
 const partText = (mem: Mem, p: Coord) => getNode(mem, p.l, p.i)?.text ?? PLACEHOLDER;
@@ -63,6 +63,22 @@ export function cutBlocks(s: string, marks: readonly number[] = MARKS): string[]
   }
   out.push(s.slice(from));
   return out;
+}
+
+// the startup header (SPEC §10): time span, view fill, summarizer backlog. Pending counts every unbuilt node over a full pair,
+// an upper bound on the calls to come (a node whose children turn out small is built free).
+export function stats(mem: Mem, now = new Date()): string[] {
+  const T = mem.root.length;
+  if (!T) return ["0 messages"];
+  const ago = (ms: number) => { const m = Math.floor(ms / 60_000); return m < 1 ? "just now" : m < 60 ? `${m}m ago` : m < 1440 ? `${Math.floor(m / 60)}h ago` : `${Math.floor(m / 1440)}d ago`; };
+  const last = new Date(mem.root[T - 1].date), size = mem.view.reduce((s, p) => s + partSize(mem, p), 0);
+  let pending = 0;
+  for (let l = 0; 2 ** l <= T; l++) for (let i = 0; (i + 1) * 2 ** l <= T; i++) if (!built(mem, l, i)) pending++;
+  const open = mem.view.filter((p) => !built(mem, p.l, p.i)).length, kb = (b: number) => (b / 1000).toFixed(1).replace(/\.0$/, "");
+  return [
+    `${T} messages, ${dayOf(new Date(mem.root[0].date))} → ${dayOf(last)}, last ${ago(now.getTime() - last.getTime())}`,
+    `view ${kb(size)}/${kb(mem.budget)} KB (${Math.round((100 * size) / mem.budget)}%), ${mem.view.length} lines · ${pending ? `${pending} ${pending === 1 ? "summary" : "summaries"} pending${open ? `, ${open} view line${open === 1 ? "" : "s"} unsummarized` : ""}` : "all summarized"}`,
+  ];
 }
 
 export const allBuilt = (mem: Mem) => mem.view.every((p) => built(mem, p.l, p.i));

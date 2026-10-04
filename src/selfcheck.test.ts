@@ -11,7 +11,7 @@ import { acquireLock, appendMessage, loadChat, newMsg } from "./store.ts";
 import { makeSummarizer } from "./summarize.ts";
 import { type Mem, built, bytes, dayOf, getNode, label, newMem, span } from "./tree.ts";
 import { createMapper, createSession, masterArgs, mcpConfig, writeSystemPrompt } from "./turn.ts";
-import { PLACEHOLDER, addMessage, addNode, cutBlocks, first, refold } from "./view.ts";
+import { PLACEHOLDER, addMessage, addNode, cutBlocks, first, refold, stats } from "./view.ts";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const tick = () => new Promise((r) => setImmediate(r));
@@ -72,6 +72,17 @@ test("cutBlocks cuts after the last line end before each mark and skips marks pa
   let at = 0;
   blocks.slice(0, 3).forEach((b, k) => { at += b.length; expect(at).toBeLessThanOrEqual([50_000, 80_000, 100_000][k]); expect(b.endsWith("\n")).toBe(true); });
   expect(at).toBeGreaterThan(99_000);
+});
+
+test("stats: time span and last activity, view fill against the budget, the summarizer backlog", () => {
+  const mem = newMem(1000);
+  expect(stats(mem)).toEqual(["0 messages"]);
+  for (let i = 0; i < 3; i++) addMessage(mem, newMsg(i, "user", "x".repeat(44), new Date(2026, 9, 1 + i, 12))); // 50 bytes each
+  addNode(mem, { l: 0, i: 0, text: "x".repeat(100), size: 100 });
+  expect(stats(mem, new Date(2026, 9, 3, 14, 30))).toEqual([
+    "3 messages, 2026-10-01 → 2026-10-03, last 2h ago",
+    "view 0.2/1 KB (16%), 3 lines · 3 summaries pending, 2 view lines unsummarized", // 100 + 2 placeholders of 29; unbuilt 0:1, 0:2, 1:0
+  ]);
 });
 
 test("the view tiles [0,T), is under budget once parents exist, never splits, and refold equals the live fold (1200 random messages)", async () => {

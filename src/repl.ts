@@ -6,9 +6,8 @@ import { openChat } from "./chat.ts";
 import { reapChildren } from "./claude.ts";
 import { MASTER_MODEL } from "./config.ts";
 import { commitData } from "./persist.ts";
-import { built } from "./tree.ts";
 import { type Out, createSession, mcpConfig, writeSystemPrompt } from "./turn.ts";
-import { render } from "./view.ts";
+import { render, stats } from "./view.ts";
 
 export type Key = "enter" | "backspace" | "clear" | "eof" | "interrupt" | "suspend";
 const KEYS: Record<string, Key> = { "\r": "enter", "\n": "enter", "\x7f": "backspace", "\b": "backspace", "\x15": "clear", "\x04": "eof", "\x03": "interrupt", "\x1a": "suspend" };
@@ -47,6 +46,7 @@ export function createKeys(on: { text(s: string): void; key(k: Key): void }) {
   };
 }
 
+const TAIL = 20; // view lines shown at startup
 const dim = (s: string) => `\x1b[2m${s}\x1b[22m`;
 const plain = (s: string) => s.replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, ""); // all but \n and \t: what the model or a tool printed must not drive the terminal
 
@@ -149,9 +149,13 @@ export async function repl(dir: string, o: Parameters<typeof openChat>[1] = {}) 
   session = createSession({ chat, out, system, mcp: mcpConfig(dir), onIdle: () => { working = false; void persist(); show(); } });
 
   problems.forEach((p) => console.error(p));
-  w(`${render(chat.mem)}\n`);
-  const open = chat.mem.view.filter((p) => !built(chat.mem, p.l, p.i)).length;
-  out.info(`optchat: ${chat.mem.root.length} messages in ${dir}, master ${MASTER_MODEL}${open ? `, ${open} view lines still to summarize` : ""}${tty ? "; Ctrl-C cancels, Ctrl-D exits" : ""}`);
+  const lines = render(chat.mem).split("\n").slice(1, -1); // the view's lines without the <chat> tags; `optchat view` shows them all
+  if (lines.length > TAIL) out.info(`… ${lines.length - TAIL} earlier view lines (optchat view)`);
+  w(lines.slice(-TAIL).map((l) => `${plain(l)}\n`).join(""));
+  const [when, fill] = stats(chat.mem);
+  out.info(`optchat: ${when}`);
+  if (fill) out.info(fill);
+  out.info(`${dir} · master ${MASTER_MODEL}${tty ? " · Ctrl-C cancels, Ctrl-D exits" : ""}`);
 
   if (!tty) { // one message per line; at the end of the input the turn is finished, then we are done
     for await (const line of console) if (line.trim()) { type(line); enter(); }
