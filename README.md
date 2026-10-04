@@ -20,10 +20,11 @@ OptChat is a chat that never ends. Its history is its memory. The memory is a bi
 
 ## Install
 
-Make a symlink to the entry point:
+Clone the repository and make a symlink to the entry point:
 
 ```sh
-ln -s ~/.claude/optchat/src/cli.ts ~/bin/optchat
+git clone https://github.com/gebeer/optchat.git
+ln -s "$PWD/optchat/src/cli.ts" ~/bin/optchat
 ```
 
 Make sure that `~/bin` is in your `PATH`.

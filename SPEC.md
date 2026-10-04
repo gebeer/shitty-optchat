@@ -3,7 +3,7 @@
 This is the build spec for OptChat, an endless chat whose history is its memory,
 using Claude Code (`claude -p`, subscription login) as the model engine.
 
-- **Base spec:** `docs/optchat-gist.md` (Victor Taelin's OptChat gist, cited
+- **Base spec:** [Victor Taelin's OptChat gist](https://gist.github.com/VictorTaelin/91837951a5ce5b38f341ec1ba1df6449) ( cited
   below as "gist §N"). It is the source of truth for everything not changed
   here. Read it fully before you start. It explains the reasons behind each
   rule, and most "obvious" shortcuts are listed there as mistakes.
@@ -857,7 +857,7 @@ Written at the end of step 4 and updated at the end of steps 5 and 6, so that a 
 
 ### 16.0 Start here
 
-1. Read this file fully, then `docs/optchat-gist.md` (the base spec; this file lists every
+1. Read this file fully, then the [OptChat gist](https://gist.github.com/VictorTaelin/91837951a5ce5b38f341ec1ba1df6449) (the base spec; this file lists every
    deviation from it).
 2. `git log --oneline` and `bun test` (expect 17 passing).
 3. The build order (§12) is complete and nothing is planned beyond it. Don't start anything
