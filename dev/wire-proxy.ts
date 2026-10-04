@@ -1,6 +1,8 @@
 // Logging pass-through for ANTHROPIC_BASE_URL. Logs ONLY payload structure
 // (block types, lengths, hashes, cache_control positions) and response usage.
 // Never logs request/response headers. Usage: LOG=file.jsonl PORT=8399 bun proxy.ts
+// Two records per request, same id: {phase:"req", ts, path, req:<shape>} on arrival, then
+// {phase:"res", tsEnd, status, usage, error} when the response ends (late, or never, if the client died).
 import { appendFileSync, writeFileSync } from "fs";
 import { createHash } from "crypto";
 
@@ -47,6 +49,7 @@ Bun.serve({
         }
       } catch { rec.req = { nonjson: raw.byteLength }; }
     }
+    appendFileSync(LOG, JSON.stringify({ ...rec, phase: "req" }) + "\n");
     const headers = new Headers(req.headers);
     headers.delete("host");
     headers.set("accept-encoding", "identity");
@@ -55,7 +58,8 @@ Bun.serve({
     const out = new Headers(res.headers);
     out.delete("content-encoding");
     out.delete("content-length");
-    if (!res.body) { appendFileSync(LOG, JSON.stringify(rec) + "\n"); return new Response(null, { status: res.status, headers: out }); }
+    const done = () => appendFileSync(LOG, JSON.stringify({ id, phase: "res", tsEnd: Date.now(), status: rec.status, usage: rec.usage, error: rec.error }) + "\n");
+    if (!res.body) { done(); return new Response(null, { status: res.status, headers: out }); }
     const [a, b] = res.body.tee();
     (async () => {
       const txt = await new Response(b).text();
@@ -70,7 +74,7 @@ Bun.serve({
         } catch {}
       }
       rec.usage = usage;
-      appendFileSync(LOG, JSON.stringify(rec) + "\n");
+      done();
     })();
     return new Response(a, { status: res.status, headers: out });
   },

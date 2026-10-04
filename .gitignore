@@ -1,0 +1,4 @@
+# wire-proxy default output and request dumps: may contain short text heads
+proxy.jsonl
+dev/*.jsonl
+dev/sys/
