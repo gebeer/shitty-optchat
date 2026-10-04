@@ -17,6 +17,9 @@ export type Mem = {
 
 export const bytes = (s: string) => Buffer.byteLength(s, "utf8");
 export const msgText = (m: Pick<Msg, "kind" | "text">) => `${m.kind}: ${m.text}`;
+const two = (n: number) => String(n).padStart(2, "0");
+export const dayOf = (d: Date) => `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())}`; // local day
+export const localTime = (iso: string) => { const d = new Date(iso); return `${dayOf(d)} ${two(d.getHours())}:${two(d.getMinutes())}`; };
 export const newMem = (budget = VIEW): Mem => ({ root: [], tree: new Map(), view: [], budget, waiters: new Set() });
 
 export const key = (l: number, i: number) => `${l}:${i}`;

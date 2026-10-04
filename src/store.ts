@@ -2,11 +2,8 @@
 // line, torn-line repair at load, and a unix-socket lock for the life of the process.
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, unlinkSync, writeSync } from "node:fs";
 import { connect, createServer } from "node:net";
-import { type Mem, type Msg, type Node, KINDS, bytes, msgText, newMem, setNode } from "./tree.ts";
-import { refold } from "./view.ts";
-
-const two = (n: number) => String(n).padStart(2, "0");
-export const dayOf = (d: Date) => `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())}`; // local day
+import { type Mem, type Msg, type Node, KINDS, bytes, dayOf, msgText, newMem, setNode } from "./tree.ts";
+import { addNode, refold } from "./view.ts";
 
 function write(path: string, text: string) {
   const buf = Buffer.from(text);
@@ -29,6 +26,8 @@ const append = (dir: string, stream: "main" | "tree", when: Date, rec: Msg | Nod
 };
 export const appendMessage = (dir: string, m: Msg) => append(dir, "main", new Date(m.date), m);
 export const appendNode = (dir: string, n: Node) => append(dir, "tree", new Date(), n);
+// persist a built node, then add it to memory and refit the view
+export const committer = (dir: string, mem: Mem) => (n: Node) => (appendNode(dir, n), addNode(mem, n));
 
 export const newMsg = (i: number, kind: Msg["kind"], text: string, date = new Date()): Msg =>
   ({ i, kind, text, size: bytes(msgText({ kind, text })), date: date.toISOString() });
@@ -37,34 +36,37 @@ const int = (x: unknown) => Number.isInteger(x) && (x as number) >= 0;
 const isMsg = (r: any): r is Msg => int(r?.i) && KINDS.includes(r.kind) && typeof r.text === "string" && typeof r.date === "string";
 const isNode = (r: any): r is Node => int(r?.l) && int(r?.i) && typeof r.text === "string";
 
-// read every record of one stream; bad lines are skipped and listed in `problems`,
-// a file that doesn't end in "\n" gets one so the next write starts on its own line
-function readStream<T>(dir: string, stream: string, ok: (r: any) => r is T, problems: string[]): T[] {
+// read every record of one stream; bad lines are skipped and listed in `problems`.
+// The writer (repair) gives a file that doesn't end in "\n" one, so its next write starts on its own line.
+// A reader must not touch the files, and can't tell a torn last line from a write in progress: it stays quiet.
+function readStream<T>(dir: string, stream: string, ok: (r: any) => r is T, problems: string[], repair: boolean): T[] {
   const folder = `${dir}/chat/${stream}`;
   if (!existsSync(folder)) return [];
   const out: T[] = [];
   for (const f of readdirSync(folder).filter((f) => /^\d{4}-\d{2}-\d{2}\.jsonl$/.test(f)).sort()) {
-    const path = `${folder}/${f}`, text = readFileSync(path, "utf8");
-    text.split("\n").forEach((line, n) => {
+    const path = `${folder}/${f}`, text = readFileSync(path, "utf8"), lines = text.split("\n");
+    const open = text !== "" && !text.endsWith("\n"); // the last line has no newline
+    lines.forEach((line, n) => {
       if (!line) return;
       try {
         const r = JSON.parse(line);
         if (ok(r)) return void out.push(r);
       } catch {}
-      problems.push(`${stream}/${f}:${n + 1}: not a valid record, skipped`);
+      if (repair || !open || n < lines.length - 1) problems.push(`${stream}/${f}:${n + 1}: not a valid record, skipped`);
     });
-    if (text && !text.endsWith("\n")) write(path, "\n");
+    if (repair && open) write(path, "\n");
   }
   return out;
 }
 
 // load the chat and fold the view; throws if the message ids are not 0, 1, 2, ...
-export function loadChat(dir: string, budget?: number) {
-  const problems: string[] = [];
-  const mem: Mem = newMem(budget);
-  mem.root = readStream(dir, "main", isMsg, problems).sort((a, b) => a.i - b.i);
+// `repair: false` for read-only callers (view, browse, mcp): they never write
+export function loadChat(dir: string, o: { budget?: number; repair?: boolean } = {}) {
+  const problems: string[] = [], repair = o.repair ?? true;
+  const mem: Mem = newMem(o.budget);
+  mem.root = readStream(dir, "main", isMsg, problems, repair).sort((a, b) => a.i - b.i);
   mem.root.forEach((m, k) => { if (m.i !== k) throw new Error(`chat/main: expected message ${k}, found ${m.i}`); });
-  for (const n of readStream(dir, "tree", isNode, problems)) setNode(mem, { ...n, size: bytes(n.text) });
+  for (const n of readStream(dir, "tree", isNode, problems, repair)) setNode(mem, { ...n, size: bytes(n.text) });
   refold(mem);
   return { mem, problems };
 }

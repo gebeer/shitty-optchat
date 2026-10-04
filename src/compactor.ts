@@ -13,6 +13,21 @@ export function makeJob(mem: Mem, l: number, i: number): Job {
   return { l, i, ctx: context(mem, (i + 1) * 2 ** l), a: getNode(mem, l - 1, 2 * i)!.text, b: getNode(mem, l - 1, 2 * i + 1)!.text };
 }
 
+// ponytail: every pass scans all nodes, O(T) per call; fine to ~1e5 messages, then keep a per-level cursor
+const each = (mem: Mem, f: (c: Coord) => boolean | void) => {
+  for (let l = 0; 2 ** l <= mem.root.length; l++)
+    for (let i = 0; (i + 1) * 2 ** l <= mem.root.length; i++) if (f({ l, i })) return;
+};
+
+// free nodes, bottom-up: no model call, so no JOBS slot and no rule 3
+export function buildFree(mem: Mem, commit: (n: Node) => void) {
+  each(mem, ({ l, i }) => {
+    if (built(mem, l, i) || !ready(mem, l, i)) return;
+    const text = freeText(mem, l, i);
+    if (text !== null) commit({ l, i, text, size: bytes(text) });
+  });
+}
+
 export function createPump(o: {
   mem: Mem;
   commit: (n: Node) => void; // persist, then add to mem and refit the view
@@ -26,21 +41,11 @@ export function createPump(o: {
   const busy = new Set<string>(), failed = new Set<string>(), timers = new Set<Timer>();
   let stopped = false;
 
-  // ponytail: every pass scans all nodes, O(T) per call; fine to ~1e5 messages, then keep a per-level cursor
-  const each = (f: (c: Coord) => boolean | void) => {
-    for (let l = 0; 2 ** l <= mem.root.length; l++)
-      for (let i = 0; (i + 1) * 2 ** l <= mem.root.length; i++) if (f({ l, i })) return;
-  };
-
   function pump() {
     if (stopped) return;
-    each(({ l, i }) => { // free nodes first, bottom-up: no call, no JOBS slot, no rule 3
-      if (built(mem, l, i) || busy.has(key(l, i)) || !ready(mem, l, i)) return;
-      const text = freeText(mem, l, i);
-      if (text !== null) commit({ l, i, text, size: bytes(text) });
-    });
+    buildFree(mem, commit);
     const head = first(mem);
-    each(({ l, i }) => {
+    each(mem, ({ l, i }) => {
       if (busy.size >= jobs) return true;
       const end = l === 0 ? i : (i + 1) * 2 ** l;
       if (built(mem, l, i) || busy.has(key(l, i)) || !ready(mem, l, i) || end > head) return;

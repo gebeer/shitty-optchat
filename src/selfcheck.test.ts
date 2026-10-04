@@ -1,11 +1,13 @@
 // Selfcheck: no model calls. The compactor is a fake, the data dirs are temp dirs.
 import { describe, expect, test } from "bun:test";
-import { appendFileSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { appendFileSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { browseHtml } from "./browse.ts";
 import { createPump } from "./compactor.ts";
 import { NODE } from "./config.ts";
-import { acquireLock, appendMessage, appendNode, dayOf, loadChat, newMsg } from "./store.ts";
-import { type Mem, built, bytes, coords, freeText, getNode, label, newMem, ready, setNode, span } from "./tree.ts";
+import { importOptmem, parseOptmem } from "./import.ts";
+import { acquireLock, appendMessage, appendNode, loadChat, newMsg } from "./store.ts";
+import { type Mem, built, bytes, coords, dayOf, freeText, getNode, label, newMem, ready, setNode, span } from "./tree.ts";
 import { PLACEHOLDER, addMessage, addNode, allBuilt, context, cutBlocks, first, refold, render, settle } from "./view.ts";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -291,5 +293,97 @@ describe("lock", () => {
     expect(existsSync(`${dir}/lock`)).toBe(true);
     (await acquireLock(dir))();
     rmSync(dir, { recursive: true });
+  });
+});
+
+describe("import-optmem, view, browse", () => {
+  // a LOG.txt record: "#<n> <day> <text>" padded with spaces to 319 bytes + newline = 320 bytes
+  const rec = (n: number, day: string, text: string) => {
+    const head = `#${n} ${day} `;
+    return head + text + " ".repeat(319 - bytes(head + text)) + "\n";
+  };
+  const texts = ["first note", "caf\u00e9 \u00e9t\u00e9: non-ASCII, padded by bytes", "L".repeat(300), "M".repeat(300), "<script>alert(1)</script> & \"quotes\" 'x'"];
+  const days = ["2026-08-08", "2026-08-09", "2026-08-09", "2026-10-04", "2026-10-04"];
+  const log = texts.map((t, n) => rec(n, days[n], t)).join("");
+  const logFile = () => { const f = `${tmp()}/LOG.txt`; writeFileSync(f, log); return f; };
+
+  test("parses fixed-width records: ids, 12:00 local dates, trimmed text", () => {
+    expect(log.split("\n").slice(0, -1).every((l) => bytes(l) === 319)).toBe(true);
+    const notes = parseOptmem(log);
+    expect(notes.map((n) => n.text)).toEqual(texts);
+    expect(notes.map((n) => n.n)).toEqual([0, 1, 2, 3, 4]);
+    notes.forEach((n, k) => expect([dayOf(n.date), n.date.getHours(), n.date.getMinutes()]).toEqual([days[k], 12, 0]));
+    expect(parseOptmem(log.trimEnd()).length).toBe(5); // no final newline is fine
+    expect(parseOptmem("")).toEqual([]);
+  });
+  test("refuses what is not a clean log", () => {
+    expect(() => parseOptmem(rec(0, "2026-08-08", "a") + rec(2, "2026-08-08", "c"))).toThrow(/contiguous from 0, expected #1, found #2/);
+    expect(() => parseOptmem(rec(1, "2026-08-08", "a"))).toThrow(/expected #0, found #1/);
+    expect(() => parseOptmem("hello\n")).toThrow(/line 1 is not/);
+    expect(() => parseOptmem(rec(0, "2026-08-08", "a") + "\n" + rec(1, "2026-08-08", "b"))).toThrow(/line 2 is not/);
+    expect(() => parseOptmem(rec(0, "2026-13-45", "a"))).toThrow(/bad date/);
+  });
+  test("imports into an empty chat only; the free nodes are built; a bad file writes nothing", async () => {
+    const dir = tmp(), file = logFile();
+    const mem = await importOptmem(dir, file);
+    const again = loadChat(dir);
+    expect(again.problems).toEqual([]);
+    expect(again.mem.root.map((m) => [m.i, m.kind, m.text])).toEqual(texts.map((t, i) => [i, "note", t]));
+    expect(again.mem.root.map((m) => dayOf(new Date(m.date)))).toEqual(days);
+    expect(again.mem.root[1].size).toBe(bytes("note: " + texts[1]));
+    expect(getNode(again.mem, 0, 3)?.text).toBe("note: " + texts[3]); // free level 0
+    expect(getNode(again.mem, 1, 0)?.text).toBe(`note: ${texts[0]}\nnote: ${texts[1]}`); // free merge of two short notes
+    expect(built(again.mem, 1, 1)).toBe(false); // 306 + 1 + 306 bytes needs the model; (2,0) waits for it
+    expect(again.mem.tree.size).toBe(mem.tree.size);
+    expect(again.mem.tree.size).toBe(5 + 1); // 5 notes and the merge (1,0)
+    expect(allBuilt(again.mem)).toBe(true);
+    await expect(importOptmem(dir, file)).rejects.toThrow(/already holds 5 messages/);
+    (await acquireLock(dir))(); // the lock was released, also after the failure
+
+    const bad = tmp();
+    writeFileSync(`${bad}/LOG.txt`, rec(0, "2026-08-08", "a") + "junk\n");
+    await expect(importOptmem(bad, `${bad}/LOG.txt`)).rejects.toThrow(/line 2/);
+    expect(existsSync(`${bad}/chat`)).toBe(false);
+  });
+  test("a reader never repairs: a torn last line stays untouched and quiet, a garbage line is reported", () => {
+    const dir = tmp(), m0 = newMsg(0, "user", "a", new Date(2026, 9, 4, 12)), m1 = newMsg(1, "user", "b", new Date(2026, 9, 4, 12));
+    appendMessage(dir, m0);
+    const f = `${dir}/chat/main/2026-10-04.jsonl`;
+    appendFileSync(f, JSON.stringify(m1).slice(0, 30));
+    const before = readFileSync(f, "utf8");
+    const r = loadChat(dir, { repair: false });
+    expect([r.mem.root.length, r.problems]).toEqual([1, []]);
+    expect(readFileSync(f, "utf8")).toBe(before);
+    appendFileSync(f, "\n{garbage}\n");
+    expect(loadChat(dir, { repair: false }).problems.length).toBe(2); // the earlier torn line is now a complete bad line
+  });
+  test("browse: one self-contained page, all text escaped, with ranges, time spans and sizes", async () => {
+    const dir = tmp();
+    const html = browseHtml(await importOptmem(dir, logFile()));
+    expect(html).toContain("&#60;script&#62;alert(1)&#60;/script&#62; &#38; &#34;quotes&#34; &#39;x&#39;");
+    expect(html).not.toMatch(/<script|<link|<img|src=|href=|https?:\/\//i);
+    expect(html).toContain("View · 5 lines");
+    expect(html).toContain("ROOT · 5 messages");
+    expect(html).toContain("Level 0 · 5 nodes");
+    expect(html).toContain("Level 1 · 1 nodes");
+    expect(html).toContain("<td>0+2</td><td>0\u20131</td><td>2026-08-08 12:00 \u2192 2026-08-09 12:00</td>"); // range and time span of the merge
+    expect(html).toContain(`<td class="n">${bytes("note: " + texts[3])}</td>`);
+  });
+  test("cli: import, view and browse end to end; view on an empty dir creates nothing", () => {
+    const dir = `${tmp()}/d`, cli = `${import.meta.dir}/cli.ts`, out = `${tmp()}/page.html`;
+    const run = (...args: string[]) => Bun.spawnSync(["bun", cli, ...args], { env: { ...process.env, OPTCHAT_DIR: dir } });
+    const text = (r: { stdout: Buffer }) => r.stdout.toString();
+    expect(text(run("view"))).toBe("<chat>\n</chat>\n");
+    expect(existsSync(dir)).toBe(false);
+    const imp = run("import-optmem", logFile());
+    expect(imp.exitCode).toBe(0);
+    expect(text(imp)).toContain("imported 5 notes");
+    const view = text(run("view"));
+    expect(view.startsWith("<chat>\n0+1|note: first note\n1+1|note: caf\u00e9")).toBe(true);
+    expect(view.endsWith("</chat>\n")).toBe(true);
+    expect(run("browse", out).exitCode).toBe(0);
+    expect(readFileSync(out, "utf8")).toContain("<title>OptChat</title>");
+    expect(run("import-optmem", logFile()).exitCode).toBe(1); // not empty any more
+    expect(run("nope").exitCode).toBe(2);
   });
 });
