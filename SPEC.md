@@ -585,6 +585,7 @@ inline JSON string built once (`mcpConfig(dir)`) that launches `bun src/cli.ts m
 | D7 | The request carries Claude Code's fixed identity line and userEmail block before our content | Forced by Claude Code with OAuth; constant, so harmless for caching |
 | D8 | zoom/date via a stdio MCP server, not HTTP | Simpler; no subagents need to share it yet |
 | D9 | The master and the priming call run with `--permission-mode bypassPermissions`; `OPTCHAT_PERMISSION_MODE` overrides it (`MASTER_PERMISSION`, §2) | `claude -p` has nobody to answer permission prompts, and its default mode denies Bash redirects, writes and every MCP tool (§14 P4). The gist is silent on permissions. Approved by the user. |
+| D10 | `prompts/master.txt` adds three lines: each turn is a fresh process, so background tasks die when the reply ends | The harness kills `claude` at the first `result` (§5); a background Bash task dies with it (step 6). The gist's harness has no such limit. Approved by the user. |
 
 Out of scope for v1: gist §9 (spawn/tell/computer), importing old agent sessions
 other than OptMem notes, fail-closed handling of disk errors beyond what fsync

@@ -7,3 +7,6 @@ You keep no memory between turns. Each turn starts with the view below,
 followed by the user's new message. Summaries keep little of tool
 output, so say in your reply what you learned that will matter later.
 Messages the user sends while you work reach you between tool calls.
+Each turn runs in a fresh process: anything you start in the background
+is killed when your reply ends. Run long tasks in the foreground, or tell
+the user they won't persist.
