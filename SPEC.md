@@ -1149,3 +1149,12 @@ Start these only when the user says so (§15, Gate).
    or OpenRouter with a model id. API key lookup: `OPENROUTER_API_KEY` from a `.env` file in
    the repo (gitignored), else from the environment, else fall back to `claude -p`. The key
    never goes into `config.ts`, logs or git. Adds a D-entry (amends D1/D6 for the compactor).
+3. **Compactor sidebar in the TUI, toggled by `/sidebar`.** A sidebar lists the compactor calls
+   that are running now (node `id+n`, level, elapsed time). When a call finishes, its entry
+   shows the result: the summary line it produced (the last model response). Finished entries
+   stay until new calls start, then the oldest finished ones leave so the list fits the
+   sidebar. `/sidebar` toggles it (registered with the slash-command autocomplete like
+   `/stats`); off by default. Data comes from the pump (start, done, failed, retry), through a
+   hook like `report`, not from the usage log. Open question: pi-tui has no side-by-side
+   layout that we have used so far; check its API (columns, or an overlay anchored right)
+   before choosing how to draw it.
