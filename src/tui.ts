@@ -87,6 +87,12 @@ const usageTable = (title: string, rows: Row[]) => {
   return t.length === 1 ? [T.dim(t[0])] : t.map((l, i) => (i ? T.text(l) : T.accent(l)));
 };
 
+const plural = (n: number, s: string) => `${n} ${s}${n === 1 ? "" : "s"}`;
+// the dir shortened from the left so the stats after it (`tail`) stay whole as long as they fit
+const place = (dir: string, tail: string, w: number) => {
+  const room = w - visibleWidth(tail);
+  return visibleWidth(dir) <= room ? dir + tail : room > 1 ? `…${dir.slice(-(room - 1))}${tail}` : tail.replace(/^ · /, "");
+};
 const k = (n: number) => (n < 1000 ? `${n}` : n < 10_000 ? `${(n / 1000).toFixed(1)}k` : n < 1e6 ? `${Math.round(n / 1000)}k` : `${(n / 1e6).toFixed(1)}M`);
 
 export async function tui(dir: string, o: Parameters<typeof openChat>[1] = {}) {
@@ -94,8 +100,15 @@ export async function tui(dir: string, o: Parameters<typeof openChat>[1] = {}) {
   const head = new Container(), chatBox = new Container(), editor = new ChatEditor(ui, editorTheme, { paddingX: 1 });
   let working = false, armed = false, running = false, spinner: ReturnType<typeof setInterval> | undefined;
   let mem: Parameters<typeof stats>[0] | null = null, fill = "", fillDirty = true;
-  const total = { turns: 0, input: 0, output: 0, read: 0, write: 0 };
+  const total = { turns: 0, primes: 0, input: 0, output: 0, read: 0, write: 0 }; // the session's turn and priming calls
   let hit: number | null = null;
+  const count = (u: any) => {
+    const i = u?.input_tokens ?? 0, rd = u?.cache_read_input_tokens ?? 0, wr = u?.cache_creation_input_tokens ?? 0;
+    total.input += i, total.output += u?.output_tokens ?? 0, total.read += rd, total.write += wr;
+    const all = total.input + total.read + total.write;
+    hit = all ? (100 * total.read) / all : null;
+    ui.requestRender();
+  };
 
   // the chat: each block after a blank line, as pi does; a streamed run (text or thinking) grows until anything else comes
   let run: { kind: "text" | "thinking"; md: Markdown; text: string } | null = null;
@@ -164,12 +177,8 @@ export async function tui(dir: string, o: Parameters<typeof openChat>[1] = {}) {
       if (at >= 0) pending.splice(at, 1);
       add(new Markdown(s, 1, 1, md, { color: T.text, bgColor: T.userBg }));
     },
-    usage(r) {
-      const u = r.usage ?? {}, i = u.input_tokens ?? 0, rd = u.cache_read_input_tokens ?? 0, wr = u.cache_creation_input_tokens ?? 0;
-      total.turns++, total.input += i, total.output += u.output_tokens ?? 0, total.read += rd, total.write += wr;
-      hit = i + rd + wr ? (100 * rd) / (i + rd + wr) : null;
-      ui.requestRender();
-    },
+    usage(r) { total.turns++; count(r.usage); },
+    prime(u) { total.primes++; count(u); },
   };
 
   const footer: Component = {
@@ -178,7 +187,7 @@ export async function tui(dir: string, o: Parameters<typeof openChat>[1] = {}) {
       const left = [total.input && `↑${k(total.input)}`, total.output && `↓${k(total.output)}`, total.read && `R${k(total.read)}`, total.write && `W${k(total.write)}`, hit !== null && `CH${hit.toFixed(1)}%`].filter(Boolean).join(" ");
       const right = `${MASTER_MODEL} • ${MASTER_EFFORT}`, gap = w - visibleWidth(left) - visibleWidth(right);
       return [
-        truncateToWidth(T.dim(`${tilde(dir)}${fill ? ` · ${fill}` : ""}`), w, T.dim("…")),
+        truncateToWidth(T.dim(place(tilde(dir), fill ? ` · ${fill}` : "", w)), w, T.dim("…")),
         gap >= 2 ? T.dim(left + " ".repeat(gap) + right) : truncateToWidth(T.dim(left || right), w, T.dim("…")),
       ];
     },
@@ -217,7 +226,7 @@ export async function tui(dir: string, o: Parameters<typeof openChat>[1] = {}) {
     const lines = [
       head("View"), ...(mem ? stats(mem) : []).map(T.text), "",
       head("This session"),
-      T.text(total.turns ? `${total.turns} turn${total.turns === 1 ? "" : "s"} · input ${n(total.input)} · cache read ${n(total.read)} · cache write ${n(total.write)} · output ${n(total.output)} · hit ${all ? ((100 * total.read) / all).toFixed(1) : "–"}%` : "no turns yet"),
+      T.text(total.turns + total.primes ? `${plural(total.turns, "turn")} · ${plural(total.primes, "priming call")} · input ${n(total.input)} · cache read ${n(total.read)} · cache write ${n(total.write)} · output ${n(total.output)} · hit ${all ? ((100 * total.read) / all).toFixed(1) : "–"}%` : "no turns yet"),
       "", head("Usage per day (usage.jsonl, all model calls)"), ...usageTable("day", day),
       "", head("Usage per ISO week"), ...usageTable("week", week),
     ];

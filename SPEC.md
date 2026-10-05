@@ -543,9 +543,11 @@ inline JSON string built once (`mcpConfig(dir)`) that launches `bun src/cli.ts m
       most) or `name {json}` (300 chars at most), then up to 10 output lines and
       `... (N more lines, Ctrl-O to expand)`. Info lines dim, errors in the error colour. The editor's top
       border shows `── ⠧ Working ───` while a turn runs. Footer: data dir · `stats()` fill
-      line (recomputed only after the view changed), then session totals of the turns
-      `↑input ↓output Rread Wwrite CHhit%` (hit of the last turn) left and `MODEL • EFFORT`
-      right. Model and tool text is stripped of control characters (`plain`) and tabs.
+      line (recomputed only after the view changed; a dir too long for the width is cut
+      from the left, `…`, so the fill stays whole), then session totals of the turns and
+      priming calls `↑input ↓output Rread Wwrite CHhit%` (hit = read / (input + read +
+      write) over all of them; the priming usage comes through `Out.prime`) left and
+      `MODEL • EFFORT` right. Compactor calls stay out of it (`/stats` has them). Model and tool text is stripped of control characters (`plain`) and tabs.
       A message sent while a turn runs waits above the editor as a dim `queued: text` line
       (pi's pending messages) and becomes a user box only when it enters the chat: when
       claude takes it (its replay event) or when it opens the next turn, or when a cancel
@@ -1189,7 +1191,7 @@ Start these only when the user says so (§15, Gate).
    `/sidebar` calls `setHidden()`. It covers the right part of the chat while shown, which is
    fine for a temporary panel. Not an `HStack`: pi-tui keeps `VStack`/`HStack` to `TuiAltScreen`,
    and moving off `TuiMainScreen` would take the chat out of the terminal scrollback (§10).
-4. **Footer cache hit = turn + prime for the session.** Today `CH` is the last master turn's
+4. **Done (§10 TUI footer).** **Footer cache hit = turn + prime for the session.** Today `CH` is the last master turn's
    `read / (input + read + write)` only (`tui.ts` `usage()`), ~99%, because the priming call
    took the cache write before the turn. Show the session's turn and prime calls together
    instead (all usage so far, same formula; ~93% on the data of 2026-10-04/05), so the footer

@@ -42,6 +42,7 @@ export type Out = {
   error?(s: string): void; thought?(tokens: number): void;
   tool?(id: string, name: string, input: unknown): void; result?(id: string, text: string, isError: boolean): void;
   usage?(result: any): void;
+  prime?(usage: any): void; // the input usage of a priming call (SPEC §6), counted with the turns in the TUI footer
   user?(text: string): void; // a message the user typed now belongs to the chat: it opens a turn, or claude took it mid-run
 };
 const usageLine = (r: any) => `(${n(r.usage?.input_tokens)} in · ${n(r.usage?.cache_read_input_tokens)} read · ${n(r.usage?.cache_creation_input_tokens)} write · ${n(r.usage?.output_tokens)} out · ${((r.duration_ms ?? 0) / 1000).toFixed(1)}s)`;
@@ -50,7 +51,7 @@ const n = (x: number) => (x ?? 0).toLocaleString("en-US");
 export const full = (out: Out): Required<Out> => ({
   error: (s) => out.info(s), thought: (t) => out.info(`thought for ~${t} tokens`),
   tool: (_, name, input) => out.info(`→ ${clip(`${name} ${JSON.stringify(input)}`)}`), result: (_, t) => out.info(`← ${clip(t)}`),
-  usage: (r) => out.info(usageLine(r)), user: () => {}, ...out,
+  usage: (r) => out.info(usageLine(r)), prime: () => {}, user: () => {}, ...out,
 } as Required<Out>);
 export type Sent = { text: string; taken: boolean };
 
@@ -90,7 +91,7 @@ export function createMapper(o: { log: (kind: Kind, text: string) => void; out: 
 // `onIdle`: called each time a turn loop ends (the REPL commits the data dir and shows the prompt there)
 export function createSession(o: { chat: Chat; out: Out; system: string; mcp: string; tap?: string; prime?: { idleMs: number } | false; onIdle?: () => void }) {
   const { chat } = o, out = full(o.out), args = masterArgs(o.system, o.mcp), queue: string[] = [];
-  const primer = o.prime === false ? null : createPrimer({ args, report: (m) => out.info(m), onUsage: (model, usage) => logUsage(chat.dir, "prime", model, usage) }), idleMs = (o.prime || { idleMs: PRIME_IDLE }).idleMs;
+  const primer = o.prime === false ? null : createPrimer({ args, report: (m) => out.info(m), onUsage: (model, usage) => { out.prime(usage); logUsage(chat.dir, "prime", model, usage); } }), idleMs = (o.prime || { idleMs: PRIME_IDLE }).idleMs;
   let call: Claude | null = null, sent: Sent[] = [], cancelled = false, stopped = false, abort: AbortController | null = null, loop: Promise<void> | null = null;
   let timer: ReturnType<typeof setTimeout> | undefined;
 
