@@ -17,6 +17,14 @@ export const MASTER_TOOLS = "Bash,Read,Edit,Write,Glob,Grep,WebFetch,WebSearch";
 export const MASTER_PERMISSION = process.env.OPTCHAT_PERMISSION_MODE ?? "bypassPermissions";
 export const COMPACT_MODEL = "sonnet";
 export const COMPACT_EFFORT = "medium";
+// the compactor on OpenRouter (SPEC §7.1, docs/probes/compact-v41-prompt-v2.1.md): the request fields besides the
+// messages; Novita first, DeepInfra when it is down, no other provider. `claude -p` with COMPACT_MODEL instead when
+// OPTCHAT_COMPACTOR=claude (the TUI demo, whose `claude` is a fake) or no OPENROUTER_API_KEY is found
+export const COMPACT_OPENROUTER = process.env.OPTCHAT_COMPACTOR === "claude" ? null : {
+  model: "deepseek/deepseek-v4.1-flash",
+  reasoning: { effort: "medium" }, // native low on Novita
+  provider: { order: ["novita/fp8", "deepinfra/fp8"], allow_fallbacks: false },
+};
 export const PRIME_MAX_AGE = 270_000; // ms: 5 min cache TTL minus margin
 export const PRIME_TIMEOUT = 30_000; // ms: a priming call the API hasn't accepted by then is given up on
 export const PRIME_IDLE = 1_000; // ms: how long the view must stay unchanged before it is primed in the background

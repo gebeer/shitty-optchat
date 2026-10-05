@@ -2,6 +2,10 @@
 proxy.jsonl
 dev/*.jsonl
 dev/sys/
+dev/probe-out/
 
 # bun install
 node_modules/
+
+# secrets (OpenRouter key, src/openrouter.ts)
+.env

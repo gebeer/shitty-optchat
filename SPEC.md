@@ -424,6 +424,31 @@ Write one by hand into `prompts/scale.txt`: dense, multi-item, tagged
 `user:`/`talk:`/`tool:`/`echo:`, about a plausible coding session. It must stay
 exactly 512 UTF-8 bytes with no trailing newline (`wc -c prompts/scale.txt`; no test checks it).
 
+### 7.1 The compactor on OpenRouter (as built, D11)
+
+The default compactor engine. `chat.ts` picks it when `COMPACT_OPENROUTER` (config.ts) is set
+and `openrouterKey()` finds `OPENROUTER_API_KEY` (the repo's gitignored `.env`, then the
+environment); otherwise `claude -p` as above, and a missing key is reported once.
+`OPTCHAT_COMPACTOR=claude` sets it to null (the TUI demo does, its `claude` is a fake).
+
+- Model and routing: `deepseek/deepseek-v4.1-flash`, `reasoning: {effort: "medium"}` (native
+  low on Novita), `provider: {order: ["novita/fp8", "deepinfra/fp8"], allow_fallbacks: false}`:
+  DeepInfra only when Novita fails, no other provider. Chosen by the probes in
+  `docs/probes/` (summary in `docs/probes/README.md`).
+- Prompt: `prompts/compact-v2.1.txt` as the system message, and
+  `prompts/compact-v2.1-step.txt` appended to the step block. `compact.txt` stays the
+  `claude -p` prompt.
+- Same `blocks()` (the cache marks ride along; DeepSeek caches on its own) and the same size
+  retries: `fit()` in `summarize.ts` runs the protocol for both engines. One chat-completions
+  request per try, `max_tokens` 16,000, the conversation kept in the summarizer. A reply with
+  no content (reasoning only, seen once on Novita in a size retry) is asked once more before
+  it counts as an empty reply.
+- Errors (HTTP status, `error` body, timeout after `CALL_TIMEOUT` for the whole job) fail the
+  job like a `claude -p` failure: reported once, retried by the pump after `RETRY`.
+- Usage: logged in the stream's field names (`input_tokens`, `cache_read_input_tokens`,
+  `cache_creation_input_tokens`, `output_tokens`) plus `cost` (USD) and `provider`, so
+  `optchat stats` sums both engines. A refetched empty reply is added to its try's line.
+
 ## 8. Prompts
 
 Files in `prompts/`, loaded at startup. The agent name is "OptChat".
@@ -601,13 +626,15 @@ inline JSON string built once (`mcpConfig(dir)`) that launches `bun src/cli.ts m
   bytes): 255 nodes, 173 free, 82 need the model.
 - `src/selfcheck.test.ts` (`bun test`): **few tests, only for real failure scenarios; no
   per-function suites; no mutation runs** (breaking code on purpose to test the tests).
-  No model calls. 19 tests, about 380 lines, ~1.1 s (it had 58, and 64 after step 5; the
+  No model calls. 21 tests, about 410 lines, ~1.1 s (it had 58, and 64 after step 5; the
   user asked for a lean suite; step 6 added one test). What is covered:
   - view and pump: the view-block cut points; the fit invariants over 1200 random
     messages (tiles `[0,T)`, under budget once parents exist, never splits, refold equals
     the live fold); pump rule 3 (messages in order, merges alongside, at most `JOBS`);
   - compactor: one failure test, end to end: a hung call times out, is reported once,
     and the node is retried and built (real summarizer, fake `claude`, real pump);
+    OpenRouter (stubbed `fetch`): a size retry and a refetched empty reply, with the usage
+    summed; the key lookup order;
   - store: a torn last line; the lock (live owner, stale socket); import: the `LOG.txt` parse;
   - the turn: the two recorded real streams (tools, thinking) through the event → log
     mapping; a late message that is requeued; a cancel that keeps the message unanswered;
@@ -650,6 +677,7 @@ inline JSON string built once (`mcpConfig(dir)`) that launches `bun src/cli.ts m
 | D8 | zoom/date via a stdio MCP server, not HTTP | Simpler; no subagents need to share it yet |
 | D9 | The master and the priming call run with `--permission-mode bypassPermissions`; `OPTCHAT_PERMISSION_MODE` overrides it (`MASTER_PERMISSION`, §2) | `claude -p` has nobody to answer permission prompts, and its default mode denies Bash redirects, writes and every MCP tool (§14 P4). The gist is silent on permissions. Approved by the user. |
 | D10 | `prompts/master.txt` adds three lines: each turn is a fresh process, so background tasks die when the reply ends | The harness kills `claude` at the first `result` (§5); a background Bash task dies with it (step 6). The gist's harness has no such limit. Approved by the user. |
+| D11 | The compactor runs on OpenRouter (DeepSeek V4.1 Flash, prompt v2.1), not `claude -p` with sonnet, when a key is found (§7.1); amends D1/D6 for the compactor | Compaction was ~2/3 of the spend and used the subscription's quota; the user prefers API prices for a cheap model. `claude -p` stays the fallback. Approved by the user. |
 
 Out of scope for v1: gist §9 (spawn/tell/computer), importing old agent sessions
 other than OptMem notes, fail-closed handling of disk errors beyond what fsync
@@ -915,7 +943,7 @@ Written at the end of step 4 and updated at the end of steps 5 and 6, so that a 
 | 5 prime | 240cfac (orphan fix), d2d2968 (proxy), ff3d093 | done, §6 as built, §14 F1–F6 |
 | 6 REPL | 4ac3180 | done, §10 as built, §14 R1–R7 (§16.7) |
 
-`bun test`: 19 tests in one file, ~1.1 s, no model calls (§10: the suite was trimmed after
+`bun test`: 21 tests in one file, ~1.1 s, no model calls (§10: the suite was trimmed after
 step 5; step 6 added the paste test). Commits 84bc1b5 and d9d69f6 (the step 4 handover),
 9f415f7 (the proxy bound to loopback), 7af5d59 (the step 5 handover), 8204193 and d20ad9c
 (the test trim and its temp-dir clean-up) are outside the steps. The tool is complete:
@@ -925,14 +953,15 @@ step 5; step 6 added the paste test). Commits 84bc1b5 and d9d69f6 (the step 4 ha
 
 | file | what it holds |
 |---|---|
-| `config.ts` | constants (gist §1, SPEC §2, `CALL_TIMEOUT`, `KILL_GRACE`, `PRIME_*`); env overrides `OPTCHAT_MODEL`, `OPTCHAT_PERMISSION_MODE`, `OPTCHAT_DIR` |
+| `config.ts` | constants (gist §1, SPEC §2, `CALL_TIMEOUT`, `KILL_GRACE`, `PRIME_*`); env overrides `OPTCHAT_MODEL`, `OPTCHAT_PERMISSION_MODE`, `OPTCHAT_DIR`, `OPTCHAT_COMPACTOR`; `COMPACT_OPENROUTER` |
 | `tree.ts` | types `Msg`/`Node`/`Coord`/`Mem`; `id+n` addressing (`span`, `label`, `coords`); `freeText`, `ready`; `built`/`getNode`/`setNode` (first write wins); `dayOf`, `localTime` |
 | `view.ts` | `fit`, `addMessage`/`addNode`, `refold`, `render`, `cutBlocks`, `allBuilt`, `first`, `context`, `settle`, `PLACEHOLDER`, `flat`, `stats` (startup header) |
 | `store.ts` | JSONL append (write + fsync), `loadChat`, `newMsg`, `committer` (persist + `addNode`), `acquireLock` |
 | `compactor.ts` | the pump: `createPump`, `buildFree`, `makeJob`, the `Job`/`Summarize` types |
-| `summarize.ts` | the real `Summarize`: layout A `blocks()`, retries, `cut()`, `SCALE`, `COMPACT_FILE`, `onCall` usage hook |
+| `summarize.ts` | the `claude -p` `Summarize`: layout A `blocks()`, `fit()` (the size retries, both engines), `cut()`, `SCALE`, `COMPACT_FILE`, `onCall` usage hook |
+| `openrouter.ts` | `openrouterKey`, `makeOpenrouterSummarizer` (§7.1) |
 | `claude.ts` | `spawnClaude` (`send`, `next`, `result`, `kill(grace)`, `stderr`, `model` (as the stream reports it), optional `tap`), `baseArgs`; the registry of running children and the exit/signal hooks that SIGTERM them (§5.2), armed by `reapChildren()` |
-| `chat.ts` | `openChat`: lock + `loadChat` + pump + `log()` |
+| `chat.ts` | `openChat`: lock + `loadChat` + pump + `log()`; picks the compactor engine |
 | `prime.ts` | `createPrimer` (§6): `prime(view)`, `stop()` |
 | `turn.ts` | `writeSystemPrompt`, `mcpConfig`, `masterArgs`, `cap`, `createMapper`, `createSession` (the turn loop, foreground and idle priming, `input`/`cancel`/`stop`/`whenIdle`, the `onIdle` option) |
 | `repl.ts` | `boot` (lock, session, commit per turn, `quit`), `header` (startup tail + `stats`), `plain`, `repl(dir, openChat options)`: plain line mode, or `tui` on a terminal (§10 as built) |
@@ -943,7 +972,7 @@ step 5; step 6 added the paste test). Commits 84bc1b5 and d9d69f6 (the step 4 ha
 | `usage.ts` | `logUsage` (one line per model call), `aggregate`, `isoWeek`, `hit`, `table` (`optchat stats`) |
 | `cli.ts` | no command: `repl(DIR)`; `view`, `stats`, `browse`, `import-optmem`, `mcp` |
 | `fake-claude.ts` | test double for `claude -p` (format in its header, `$sleep` and `$take` for demos; reads stdin all the time; exits on a closed stdin and on SIGTERM) |
-| `selfcheck.test.ts` | the 19 tests (§10) |
+| `selfcheck.test.ts` | the 21 tests (§10) |
 | `fixtures/` | `turn-tools.jsonl`, `turn-thinking.jsonl`: real master streams, sanitized |
 
 `prompts/`: `compact.txt` (gist §4.4 verbatim), `scale.txt` (512 bytes), `master.txt`,
@@ -1142,7 +1171,7 @@ Start these only when the user says so (§15, Gate).
      `view_doc.txt` stay gist-derived; it must stay byte-stable across turns (cache). At most
      one sentence in `view_doc.txt` on when to use `search`.
    - A new D-entry (§11), §9 and README updated, one test (hits, case, cap, no hits).
-2. **Compactor through OpenRouter, switchable by config** (depends on the compactor model
+2. **Done (§7.1, D11).** **Compactor through OpenRouter, switchable by config** (depends on the compactor model
    probe, `docs/probes/compact-models.md`). Reason: compaction is ~2/3 of the spend and
    uses the subscription's quota/rate limits; the user prefers paying API prices for a cheap
    model. The engine is chosen in config (not at runtime in the TUI): `claude -p` as today,

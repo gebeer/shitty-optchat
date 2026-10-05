@@ -1,0 +1,1 @@
+Reminder: facts from this stretch only (requests stay requests); about 55-65 words in at most 7 items, never over 70 words; compressed notes; one line, no line breaks; ASCII; output only the line.

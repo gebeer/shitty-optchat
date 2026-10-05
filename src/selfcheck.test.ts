@@ -6,6 +6,7 @@ import { dirname } from "node:path";
 import { openChat } from "./chat.ts";
 import { createPump } from "./compactor.ts";
 import { importOptmem, parseOptmem } from "./import.ts";
+import { makeOpenrouterSummarizer, openrouterKey } from "./openrouter.ts";
 import { acquireLock, appendMessage, loadChat, newMsg } from "./store.ts";
 import { makeSummarizer } from "./summarize.ts";
 import { aggregate, hit, isoWeek, table } from "./usage.ts";
@@ -418,4 +419,29 @@ test("usage aggregation: local days and ISO weeks, legacy lines are turns, bad l
   expect(table("day", day.slice(0, 2))).toBe("day: no model calls");
   expect(isoWeek(new Date(2026, 0, 1))).toBe("2026-W01");
   expect(isoWeek(new Date(2027, 0, 1))).toBe("2026-W53");
+});
+
+test("OpenRouter key: the repo .env wins over the environment, then the environment, else none", () => {
+  const f = `${tmp()}/.env`;
+  expect(openrouterKey(f, { OPENROUTER_API_KEY: "env" })).toBe("env");
+  expect(openrouterKey(f, {})).toBeUndefined();
+  writeFileSync(f, "# x\nOTHER=1\nexport OPENROUTER_API_KEY=\"file\"\n");
+  expect(openrouterKey(f, { OPENROUTER_API_KEY: "env" })).toBe("file");
+});
+
+test("OpenRouter compactor: a long line gets the size retry, an empty reply is asked once more and billed, the fitting line wins", async () => {
+  const replies = ["x ".repeat(400), "", "a short line"], bodies: any[] = [], calls: any[] = [], real = globalThis.fetch;
+  globalThis.fetch = (async (_: any, init: any) => {
+    bodies.push(JSON.parse(init.body));
+    return Response.json({ model: "m", provider: "p", choices: [{ message: { content: replies.shift() } }], usage: { prompt_tokens: 100, completion_tokens: 10, prompt_tokens_details: { cached_tokens: 60 }, cost: 0.001 } });
+  }) as any;
+  try {
+    const line = await makeOpenrouterSummarizer("k", { model: "m", reasoning: {}, provider: {} } as any, { onCall: (c) => calls.push(c) })({ l: 0, i: 0, ctx: ["user: hi"], msg: newMsg(0, "user", "hi") });
+    expect(line).toBe("a short line");
+    expect(bodies.length).toBe(3);
+    expect(bodies[2].messages.map((m: any) => m.role)).toEqual(["system", "user", "assistant", "user"]); // no empty assistant turn
+    expect(bodies[2].messages[3].content[0].text).toStartWith("That line is 799 bytes") // trimmed;
+    expect(calls.map((c) => c.usage.output_tokens)).toEqual([10, 20]);
+    expect(calls[1].usage).toMatchObject({ input_tokens: 80, cache_read_input_tokens: 120, cost: 0.002, provider: "p" });
+  } finally { globalThis.fetch = real; }
 });

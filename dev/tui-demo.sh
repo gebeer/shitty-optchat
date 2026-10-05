@@ -7,4 +7,4 @@ dir=/tmp/oc-tui
 [ "$1" = "--keep" ] || rm -rf "$dir" "$dir.log" "$dir.json"
 mkdir -p "$dir" && touch "$dir.log"
 bun "$here/dev/tui-demo.ts" "$dir.json"
-OPTCHAT_DIR=$dir OPTCHAT_CLAUDE=$here/src/fake-claude.ts FAKE_CLAUDE_LOG=$dir.log FAKE_CLAUDE_SCRIPT=$dir.json exec bun "$here/src/cli.ts"
+OPTCHAT_DIR=$dir OPTCHAT_COMPACTOR=claude OPTCHAT_CLAUDE=$here/src/fake-claude.ts FAKE_CLAUDE_LOG=$dir.log FAKE_CLAUDE_SCRIPT=$dir.json exec bun "$here/src/cli.ts"

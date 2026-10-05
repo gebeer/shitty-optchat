@@ -1,5 +1,6 @@
 // The compactor's model call (gist §4.2, §4.3, SPEC §7): one `claude -p` per node, no tools,
-// the view as cached context (layout A), size retries in the same process.
+// the view as cached context (layout A), size retries in the same process. The OpenRouter compactor
+// (openrouter.ts) reuses blocks() and fit().
 import { readFileSync } from "node:fs";
 import { type Block, baseArgs, spawnClaude } from "./claude.ts";
 import type { Job, Summarize } from "./compactor.ts";
@@ -31,26 +32,36 @@ export function blocks(job: Job): Block[] {
 export const cut = (line: string) => Buffer.from(line).subarray(0, NODE).toString("utf8").replace(/�$/, "");
 const retry = (line: string) => `That line is ${bytes(line)} bytes; the limit is ${NODE}. It must end where it is cut here:\n${cut(line)}| ← LIMIT`;
 
+// one model reply: the line, its usage for the log, and why the call failed (its usage is logged all the same)
+export type Reply = { line: string; usage: any; model: string | undefined; fail?: string };
+
+// the size retries over one conversation (gist §4.3), for either engine: `ask` sends blocks and returns the reply;
+// a line over NODE gets retry() until it fits or TRIES are used, then the shortest try wins
+export async function fit(job: Job, first: Block[], ask: (b: Block[]) => Promise<Reply>, onCall?: (c: CallInfo) => void) {
+  const tries: string[] = [];
+  for (let b = first; ; b = [{ type: "text", text: retry(tries[tries.length - 1]) }]) {
+    const t0 = Date.now(), r = await ask(b);
+    onCall?.({ job, attempt: tries.length + 1, model: r.model, usage: r.usage, ms: Date.now() - t0 });
+    if (r.fail) throw new Error(r.fail);
+    if (!r.line) throw new Error("empty reply");
+    tries.push(r.line);
+    if (bytes(r.line) <= NODE || tries.length >= TRIES) return tries.reduce((a, b) => (bytes(b) < bytes(a) ? b : a)); // the shortest try
+  }
+}
+
 export function makeSummarizer(o: { timeoutMs?: number; onCall?: (c: CallInfo) => void } = {}): Summarize {
   const timeoutMs = o.timeoutMs ?? CALL_TIMEOUT;
   return async (job) => {
     const claude = spawnClaude([...baseArgs(COMPACT_MODEL, COMPACT_EFFORT, COMPACT_FILE, ""), "--safe-mode"], { DISABLE_PROMPT_CACHING: "1" });
     let timedOut = false;
     const timer = setTimeout(() => ((timedOut = true), claude.kill()), timeoutMs); // a hung call must free its slot
-    const tries: string[] = [];
     try {
-      claude.send(blocks(job));
-      for (;;) {
-        const t0 = Date.now(), r = await claude.result();
-        o.onCall?.({ job, attempt: tries.length + 1, model: claude.model(), usage: r.usage, ms: Date.now() - t0 });
-        if (r.is_error) throw new Error(`claude: ${String(r.result ?? r.subtype).slice(0, 300)}`);
-        if (r.stop_reason === "refusal") throw new Error("refused");
-        const line = String(r.result ?? "").trim();
-        if (!line) throw new Error("empty reply");
-        tries.push(line);
-        if (bytes(line) <= NODE || tries.length >= TRIES) return tries.reduce((a, b) => (bytes(b) < bytes(a) ? b : a)); // the shortest try
-        claude.send([{ type: "text", text: retry(line) }]);
-      }
+      return await fit(job, blocks(job), async (b) => {
+        claude.send(b);
+        const r = await claude.result();
+        const fail = r.is_error ? `claude: ${String(r.result ?? r.subtype).slice(0, 300)}` : r.stop_reason === "refusal" ? "refused" : undefined;
+        return { line: String(r.result ?? "").trim(), usage: r.usage, model: claude.model(), fail };
+      }, o.onCall);
     } catch (e) {
       throw timedOut ? new Error(`no result after ${timeoutMs / 1000}s`) : e;
     } finally {

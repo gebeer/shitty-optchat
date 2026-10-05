@@ -7,7 +7,7 @@ OptChat is a chat that never ends. Its history is its memory. The memory is a bi
 
 - A Bun harness drives `claude -p` (Claude Code). It runs on a Claude subscription, not on API billing.
 - Each user message starts one fresh `claude` call. The call gets the current view of the summary tree.
-- A compactor on sonnet writes the summaries in the background.
+- A compactor writes the summaries in the background: DeepSeek V4.1 Flash through OpenRouter (API billing), or sonnet through `claude -p` when no OpenRouter key is found.
 - A priming call writes the view into the prompt cache before the turn. This makes turns cheaper.
 - An MCP server gives the model two tools: `zoom` opens a summary, and `date` gives the time of a message.
 
@@ -17,6 +17,7 @@ OptChat is a chat that never ends. Its history is its memory. The memory is a bi
 
 - [Bun](https://bun.sh).
 - [Claude Code](https://docs.claude.com/en/docs/claude-code), logged in.
+- For the compactor: an OpenRouter API key, as `OPENROUTER_API_KEY=...` in a `.env` file in the repository (gitignored) or in the environment. Without it the compactor uses `claude -p`. Set `OPTCHAT_COMPACTOR=claude` to use `claude -p` anyway.
 
 ## Install
 
