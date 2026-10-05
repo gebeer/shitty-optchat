@@ -15,7 +15,8 @@ export const SCALE = readFileSync(`${PROMPTS}scale.txt`, "utf8"); // a hand-writ
 export type CallInfo = { job: Job; attempt: number; model: string | undefined; usage: any; ms: number };
 
 const step = (job: Job) =>
-  `For scale, this line is exactly ${NODE} bytes:\n${SCALE}\n\n` +
+  // the sample is marked as made up: unmarked, it leaked into real nodes as if the chat had said it (D12)
+  `For scale, this made-up sample line (not from this chat, never copy from it) is exactly ${NODE} bytes:\n<scale>${SCALE}</scale>\n\n` +
   ("msg" in job
     ? `Compress this message into one line, in at most ${NODE} bytes:\n${msgText(job.msg)}`
     : `Merge these two lines into one, in at most ${NODE} bytes:\n${flat(job.a)}\n${flat(job.b)}`);

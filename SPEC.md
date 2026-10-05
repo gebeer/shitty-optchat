@@ -423,6 +423,7 @@ goes into the 10 s retry loop.
 Write one by hand into `prompts/scale.txt`: dense, multi-item, tagged
 `user:`/`talk:`/`tool:`/`echo:`, about a plausible coding session. It must stay
 exactly 512 UTF-8 bytes with no trailing newline (`wc -c prompts/scale.txt`; no test checks it).
+In the step it is wrapped in `<scale>…</scale>` and introduced as a made-up sample (D12).
 
 ### 7.1 The compactor on OpenRouter (as built, D11)
 
@@ -697,6 +698,7 @@ inline JSON string built once (`mcpConfig(dir)`) that launches `bun src/cli.ts m
 | D9 | The master and the priming call run with `--permission-mode bypassPermissions`; `OPTCHAT_PERMISSION_MODE` overrides it (`MASTER_PERMISSION`, §2) | `claude -p` has nobody to answer permission prompts, and its default mode denies Bash redirects, writes and every MCP tool (§14 P4). The gist is silent on permissions. Approved by the user. |
 | D10 | `prompts/master.txt` adds three lines: each turn is a fresh process, so background tasks die when the reply ends | The harness kills `claude` at the first `result` (§5); a background Bash task dies with it (step 6). The gist's harness has no such limit. Approved by the user. |
 | D11 | The compactor runs on OpenRouter (DeepSeek V4.1 Flash, prompt v2.1), not `claude -p` with sonnet, when a key is found (§7.1); amends D1/D6 for the compactor | Compaction was ~2/3 of the spend and used the subscription's quota; the user prefers API prices for a cheap model. `claude -p` stays the fallback. Approved by the user. |
+| D12 | The step marks SCALE as a made-up sample, in `<scale>` tags, not from the chat (§7) | Unmarked, the sample leaked: on 2026-10-05 Sonnet wrote its export.py story into the real node 720+2 as chat content, and the merges above carried it up (720+4, 720+8). Approved by the user. |
 
 Out of scope for v1: gist §9 (spawn/tell/computer), importing old agent sessions
 other than OptMem notes, fail-closed handling of disk errors beyond what fsync
