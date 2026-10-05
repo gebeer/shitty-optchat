@@ -1123,3 +1123,29 @@ Built as §10 "As built" says (`repl.ts`, `persist.ts`, small changes in `turn.t
   Ctrl-C, cancels a running turn.
 - Terminal limits (§10): a wrapped or pasted input is erased only on its last row, wide
   characters back up one column, there are no cursor keys or history.
+
+### 16.9 Planned (approved by the user, not started)
+
+Start these only when the user says so (§15, Gate).
+
+1. **`search` tool and the raw-log hint.** The master reaches old detail only by zooming
+   down from the view. A fact that a high-level summary dropped gives it no hint where to
+   zoom, and a topic spread over hundreds of messages costs one zoom per step. The master has
+   Bash/Read/Grep, but nothing tells it where the log is.
+   - `search(text)` in the MCP server (`mcp.ts`, read-only like `zoom`/`date`, no lock):
+     case-insensitive substring over the raw messages (not the summaries), hits as
+     `id+1|<snippet around the hit>`, newest first, capped (~50, then "N more"); the model
+     follows up with `zoom(id, 1)`.
+   - The hint: the log location (`<OPTCHAT_DIR>/chat/main/YYYY-MM-DD.jsonl`, one
+     `{i, kind, text, size, date}` per line) where the model sees it. Preferred: in the
+     `search` tool description, built from `OPTCHAT_DIR` at server start, so `master.txt` and
+     `view_doc.txt` stay gist-derived; it must stay byte-stable across turns (cache). At most
+     one sentence in `view_doc.txt` on when to use `search`.
+   - A new D-entry (§11), §9 and README updated, one test (hits, case, cap, no hits).
+2. **Compactor through OpenRouter, switchable by config** (depends on the compactor model
+   probe, `docs/probes/compact-models.md`). Reason: compaction is ~2/3 of the spend and
+   uses the subscription's quota/rate limits; the user prefers paying API prices for a cheap
+   model. The engine is chosen in config (not at runtime in the TUI): `claude -p` as today,
+   or OpenRouter with a model id. API key lookup: `OPENROUTER_API_KEY` from a `.env` file in
+   the repo (gitignored), else from the environment, else fall back to `claude -p`. The key
+   never goes into `config.ts`, logs or git. Adds a D-entry (amends D1/D6 for the compactor).
