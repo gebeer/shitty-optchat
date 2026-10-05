@@ -561,8 +561,16 @@ inline JSON string built once (`mcpConfig(dir)`) that launches `bun src/cli.ts m
       shown as a marker and sent whole, Shift-Enter or Ctrl-J for a newline, Up/Down
       history of what was sent). Enter sends (while a turn runs, to the running call, §5.2);
       Esc cancels a running turn; Ctrl-D on an empty editor exits; Ctrl-O toggles all tool
-      boxes between the preview and the whole title and output (pi's `app.tools.expand`). `/stats` (the only slash command; the editor completes it,
-      no file completion) is never sent to the model: it opens a bordered, scrollable overlay
+      boxes between the preview and the whole title and output (pi's `app.tools.expand`). Slash
+      commands (the editor completes them, no file completion) are never sent to the model.
+      `/summaries` (`/s`, listed first so an exact `/s` + Enter picks it) shows or hides a
+      top-right overlay, 30% wide, off at start, only drawn at 100+ columns, that never takes
+      the keys (`nonCapturing`; not an `HStack`, which pi-tui keeps to `TuiAltScreen`): the
+      compactor calls from the pump's `onJob` hook (start, done with the line, failed with the
+      error; a failed node starts again after `RETRY`). Running calls first with their
+      elapsed time (redrawn each second while shown), then finished ones newest first with
+      their line wrapped; finished entries stay until the rows are needed, then the oldest
+      leave. `/stats` it opens a bordered, scrollable overlay
       (`StatsPanel`) with `stats(mem)`, this session's turn totals and the `optchat stats`
       tables (`usage.ts` `aggregate`/`table`, days without calls dim); arrows, PgUp/PgDn,
       Home/End scroll, Esc or `q` closes, and while it is open no key reaches the chat (Esc
@@ -959,7 +967,7 @@ step 5; step 6 added the paste test). Commits 84bc1b5 and d9d69f6 (the step 4 ha
 | `tree.ts` | types `Msg`/`Node`/`Coord`/`Mem`; `id+n` addressing (`span`, `label`, `coords`); `freeText`, `ready`; `built`/`getNode`/`setNode` (first write wins); `dayOf`, `localTime` |
 | `view.ts` | `fit`, `addMessage`/`addNode`, `refold`, `render`, `cutBlocks`, `allBuilt`, `first`, `context`, `settle`, `PLACEHOLDER`, `flat`, `stats` (startup header) |
 | `store.ts` | JSONL append (write + fsync), `loadChat`, `newMsg`, `committer` (persist + `addNode`), `acquireLock` |
-| `compactor.ts` | the pump: `createPump`, `buildFree`, `makeJob`, the `Job`/`Summarize` types |
+| `compactor.ts` | the pump: `createPump` (its `onJob` events), `buildFree`, `makeJob`, the `Job`/`Summarize`/`JobEvent` types |
 | `summarize.ts` | the `claude -p` `Summarize`: layout A `blocks()`, `fit()` (the size retries, both engines), `cut()`, `SCALE`, `COMPACT_FILE`, `onCall` usage hook |
 | `openrouter.ts` | `openrouterKey`, `makeOpenrouterSummarizer` (§7.1) |
 | `claude.ts` | `spawnClaude` (`send`, `next`, `result`, `kill(grace)`, `stderr`, `model` (as the stream reports it), optional `tap`), `baseArgs`; the registry of running children and the exit/signal hooks that SIGTERM them (§5.2), armed by `reapChildren()` |
@@ -967,7 +975,7 @@ step 5; step 6 added the paste test). Commits 84bc1b5 and d9d69f6 (the step 4 ha
 | `prime.ts` | `createPrimer` (§6): `prime(view)`, `stop()` |
 | `turn.ts` | `writeSystemPrompt`, `mcpConfig`, `masterArgs`, `cap`, `createMapper`, `createSession` (the turn loop, foreground and idle priming, `input`/`cancel`/`stop`/`whenIdle`, the `onIdle` option) |
 | `repl.ts` | `boot` (lock, session, commit per turn, `quit`), `header` (startup tail + `stats`), `plain`, `repl(dir, openChat options)`: plain line mode, or `tui` on a terminal (§10 as built) |
-| `tui.ts` | `tui(dir, openChat options)`: the pi-tui chat (theme, chat blocks, tool boxes, working border, footer, keys, Ctrl-Z, `/stats` overlay) |
+| `tui.ts` | `tui(dir, openChat options)`: the pi-tui chat (theme, chat blocks, tool boxes, working border, footer, keys, Ctrl-Z, `/stats` and `/summaries` overlays) |
 | `persist.ts` | `commitData(dir, msg)`: the data dir's own git repo, one commit per turn (§10) |
 | `mcp.ts` | `TOOLS`, `zoom`, `date`, `serveMcp` |
 | `import.ts`, `browse.ts` | `parseOptmem`/`importOptmem`; `browseHtml` |
@@ -1163,6 +1171,8 @@ Start these only when the user says so (§15, Gate).
    down from the view. A fact that a high-level summary dropped gives it no hint where to
    zoom, and a topic spread over hundreds of messages costs one zoom per step. The master has
    Bash/Read/Grep, but nothing tells it where the log is.
+   **Dropped by the user (2026-10-05):** unsure it adds real value, and it deviates from the
+   gist. The hint alone (where the log is) would be the cheap version if it comes back.
    - `search(text)` in the MCP server (`mcp.ts`, read-only like `zoom`/`date`, no lock):
      case-insensitive substring over the raw messages (not the summaries), hits as
      `id+1|<snippet around the hit>`, newest first, capped (~50, then "N more"); the model
@@ -1180,7 +1190,7 @@ Start these only when the user says so (§15, Gate).
    or OpenRouter with a model id. API key lookup: `OPENROUTER_API_KEY` from a `.env` file in
    the repo (gitignored), else from the environment, else fall back to `claude -p`. The key
    never goes into `config.ts`, logs or git. Adds a D-entry (amends D1/D6 for the compactor).
-3. **Compactor sidebar in the TUI, toggled by `/sidebar`.** A sidebar lists the compactor calls
+3. **Done (§10 TUI, as `/summaries` and `/s`).** **Compactor sidebar in the TUI, toggled by `/sidebar`.** A sidebar lists the compactor calls
    that are running now (node `id+n`, level, elapsed time). When a call finishes, its entry
    shows the result: the summary line it produced (the last model response). Finished entries
    stay until new calls start, then the oldest finished ones leave so the list fits the

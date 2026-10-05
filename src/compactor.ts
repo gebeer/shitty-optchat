@@ -7,6 +7,8 @@ import { context, first } from "./view.ts";
 
 export type Job = { l: number; i: number; ctx: string[] } & ({ msg: Msg } | { a: string; b: string });
 export type Summarize = (job: Job) => Promise<string>;
+// a model call of the pump, for the TUI's /summaries: started, then done with its line or failed with the error (and started again after the wait)
+export type JobEvent = { label: string; state: "start" | "done" | "failed"; text?: string };
 
 export function makeJob(mem: Mem, l: number, i: number): Job {
   if (l === 0) return { l, i, ctx: context(mem, i), msg: mem.root[i] };
@@ -35,9 +37,10 @@ export function createPump(o: {
   jobs?: number;
   retryMs?: number;
   report?: (msg: string) => void;
+  onJob?: (e: JobEvent) => void;
 }) {
   const { mem, commit, summarize } = o;
-  const jobs = o.jobs ?? JOBS, retryMs = o.retryMs ?? RETRY, report = o.report ?? (() => {});
+  const jobs = o.jobs ?? JOBS, retryMs = o.retryMs ?? RETRY, report = o.report ?? (() => {}), onJob = o.onJob ?? (() => {});
   const busy = new Set<string>(), failed = new Set<string>(), timers = new Set<Timer>();
   let stopped = false;
 
@@ -56,6 +59,8 @@ export function createPump(o: {
   function start(c: Coord) {
     const k = key(c.l, c.i), job = makeJob(mem, c.l, c.i); // the job sees the state this pump decided on
     busy.add(k);
+    const ev = { label: label(c) }; // id+n: n = 2^level
+    onJob({ ...ev, state: "start" });
     Promise.resolve()
       .then(() => summarize(job))
       .then((text) => {
@@ -63,12 +68,14 @@ export function createPump(o: {
         text = text.trim();
         if (!text) throw new Error("empty summary");
         commit({ ...c, text, size: bytes(text) });
+        onJob({ ...ev, state: "done", text });
         busy.delete(k), failed.delete(k);
         pump();
       })
       .catch((err) => {
         if (stopped) return;
         if (!failed.has(k)) (failed.add(k), report(`${label(c)}: ${err?.message ?? err}`)); // only the first failure
+        onJob({ ...ev, state: "failed", text: String(err?.message ?? err) });
         const t = setTimeout(() => (timers.delete(t), busy.delete(k), pump()), retryMs); // fixed wait, forever
         timers.add(t);
       });

@@ -60,6 +60,8 @@ Only one chat can run on a data directory at a time.
 
 Type `/stats` (the editor completes slash commands) to open a stats panel: the view, the token totals of this session and the usage tables of `optchat stats`. Up, Down, PgUp, PgDn, Home and End scroll it. Esc or `q` closes it. The model does not get `/stats`.
 
+Type `/summaries` or `/s` to show or hide a panel at the top right with the compactor calls: the running ones with their time, then the finished ones with the summary line they wrote. It needs a terminal at least 100 columns wide. The editor keeps the keys while the panel is shown.
+
 To try the TUI without model calls, run `dev/tui-demo.sh`. It uses a fake `claude` and a scratch directory in `/tmp/oc-tui`.
 
 ## Status

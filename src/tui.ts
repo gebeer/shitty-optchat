@@ -3,11 +3,12 @@
 // editor (its top border shows the spinner while a turn runs), the footer. The session and the data dir are repl.ts's boot().
 import {
   type AutocompleteProvider, Box, CombinedAutocompleteProvider, type Component, Container, Editor, type EditorTheme, type MarkdownTheme, Markdown, ProcessTerminal, Spacer, Text,
-  TuiMainScreen, backgroundAnsi, foregroundAnsi, getTerminalColorMode, matchesKey, parseColor, truncateToWidth, visibleWidth,
+  type OverlayHandle, TuiMainScreen, backgroundAnsi, foregroundAnsi, getTerminalColorMode, matchesKey, parseColor, truncateToWidth, visibleWidth, wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import type { openChat } from "./chat.ts";
+import type { JobEvent } from "./compactor.ts";
 import { MASTER_EFFORT, MASTER_MODEL } from "./config.ts";
 import { boot, header, plain } from "./repl.ts";
 import type { Out } from "./turn.ts";
@@ -54,18 +55,24 @@ class ChatEditor extends Editor {
   }
 }
 
+// an overlay's border: `title` in the top edge, `note` in the bottom one, each line cut to the width
+const frame = (w: number, lines: string[], title: string, note: string) => {
+  const b = T.borderMuted, inner = Math.max(1, w - 4);
+  const pad = (s: string) => { const t = truncateToWidth(s, inner, "…"); return `${b("│")} ${t}${" ".repeat(Math.max(0, inner - visibleWidth(t)))} ${b("│")}`; };
+  const edge = (l: string, label: string, r: string) => { const t = truncateToWidth(label, Math.max(0, w - 4), ""); return b(`${l}─`) + t + b(`${"─".repeat(Math.max(0, w - 3 - visibleWidth(t)))}${r}`); };
+  return [edge("╭", T.accent(bold(` ${title} `)), "╮"), ...lines.map(pad), edge("╰", note && T.muted(` ${note} `), "╯")];
+};
+
 // the /stats overlay: a bordered, scrollable panel; ↑↓ PgUp PgDn Home End scroll, Esc or q closes
 class StatsPanel implements Component {
   top = 0;
   constructor(private lines: string[], private rows: () => number, private close: () => void, private redraw: () => void) {}
   height() { return Math.max(3, Math.min(this.lines.length, this.rows() - 4)); } // body rows: the screen less the borders and a margin
   render(w: number) {
-    const h = this.height(), max = Math.max(0, this.lines.length - h), b = T.borderMuted;
+    const h = this.height(), max = Math.max(0, this.lines.length - h);
     this.top = Math.min(Math.max(0, this.top), max);
-    const inner = Math.max(1, w - 4), pad = (s: string) => { const t = truncateToWidth(s, inner, "…"); return `${b("│")} ${t}${" ".repeat(Math.max(0, inner - visibleWidth(t)))} ${b("│")}`; };
-    const edge = (l: string, label: string, r: string) => { const t = truncateToWidth(label, Math.max(0, w - 4), ""); return b(`${l}─`) + t + b(`${"─".repeat(Math.max(0, w - 3 - visibleWidth(t)))}${r}`); };
-    const where = max ? T.muted(` ${this.top + 1}–${this.top + h} of ${this.lines.length} · ↑↓ scroll · Esc/q closes `) : T.muted(" Esc/q closes ");
-    return [edge("╭", T.accent(bold(" stats ")), "╮"), ...this.lines.slice(this.top, this.top + h).map(pad), edge("╰", where, "╯")];
+    const where = max ? `${this.top + 1}–${this.top + h} of ${this.lines.length} · ↑↓ scroll · Esc/q closes` : "Esc/q closes";
+    return frame(w, this.lines.slice(this.top, this.top + h), "stats", where);
   }
   handleInput(d: string) {
     const h = this.height();
@@ -77,6 +84,37 @@ class StatsPanel implements Component {
     else if (matchesKey(d, "home")) this.top = 0;
     else if (matchesKey(d, "end")) this.top = this.lines.length;
     this.redraw();
+  }
+  invalidate() {}
+}
+
+// the /summaries overlay (SPEC §10): the compactor calls, running ones first (elapsed time), then the finished ones newest
+// first with the line they wrote, or the error. Finished entries stay until the rows are needed, then the oldest leave.
+type Entry = JobEvent & { at: number; ms?: number };
+const secs = (ms: number) => `${(ms / 1000).toFixed(ms < 10_000 ? 1 : 0)}s`;
+class Summaries implements Component {
+  entries: Entry[] = []; // in start order
+  constructor(private rows: () => number) {}
+  job(e: JobEvent) {
+    if (e.state === "start") return void this.entries.push({ ...e, at: Date.now() });
+    const x = this.entries.findLast((x) => x.label === e.label && x.state === "start");
+    if (x) Object.assign(x, e, { ms: Date.now() - x.at });
+  }
+  running() { return this.entries.some((x) => x.state === "start"); }
+  render(w: number) {
+    const inner = Math.max(1, w - 4), budget = Math.max(3, this.rows() - 8); // body rows: the editor and the footer stay clear
+    const block = (x: Entry) => x.state === "start"
+      ? [`${T.accent("◌")} ${x.label} ${T.muted(secs(Date.now() - x.at))}`]
+      : [`${x.state === "done" ? T.green("✓") : T.error("✗")} ${x.label} ${T.muted(secs(x.ms ?? 0))}`,
+         ...wrapTextWithAnsi(clean(x.text ?? ""), inner).map(x.state === "done" ? T.text : T.error)];
+    const lines = this.entries.filter((x) => x.state === "start").flatMap(block), kept = new Set<Entry>();
+    for (const x of this.entries.filter((x) => x.state !== "start").reverse()) {
+      const b = [...(lines.length ? [""] : []), ...block(x)];
+      if (lines.length + b.length > budget) break;
+      lines.push(...b), kept.add(x);
+    }
+    this.entries = this.entries.filter((x) => x.state === "start" || kept.has(x));
+    return frame(w, lines.length ? lines.slice(0, budget) : [T.dim("no compactor calls yet")], "summaries", "/s hides");
   }
   invalidate() {}
 }
@@ -203,7 +241,9 @@ export async function tui(dir: string, o: Parameters<typeof openChat>[1] = {}) {
   };
   const stop = () => { if (running) (running = false), clearInterval(spinner), ui.stop(); };
 
-  const { chat, problems, session, quit } = await boot(dir, out, () => { busy(false); fillDirty = true; }, o);
+  const summaries = new Summaries(() => term.rows); // filled from the first pump on, shown by /summaries
+  const onJob = (e: JobEvent) => { summaries.job(e); ui.requestRender(); };
+  const { chat, problems, session, quit } = await boot(dir, out, () => { busy(false); fillDirty = true; }, { ...o, onJob });
   process.on("exit", stop); // the terminal back to normal after a signal or an uncaught error too
   mem = chat.mem;
   chat.mem.waiters.add(() => { fillDirty = true; }); // the view changed: the footer recomputes its stats() on the next frame
@@ -215,7 +255,7 @@ export async function tui(dir: string, o: Parameters<typeof openChat>[1] = {}) {
   for (const l of h.tail) head.addChild(row(() => l.replace(/\t/g, " ")));
   head.addChild(new Spacer(1));
   head.addChild(row(() => T.dim(`optchat: ${h.stats[0]}`)));
-  head.addChild(row(() => T.dim("Enter sends · Esc cancels · Ctrl-O expands tools · /stats · Ctrl-C twice/Ctrl-D exits · Ctrl-Z suspends · ↑↓ history")));
+  head.addChild(row(() => T.dim("Enter sends · Esc cancels · Ctrl-O expands tools · /stats · /summaries (/s) · Ctrl-C twice/Ctrl-D exits · Ctrl-Z suspends · ↑↓ history")));
 
   // /stats: never sent to the model
   let panel: StatsPanel | null = null;
@@ -233,7 +273,21 @@ export async function tui(dir: string, o: Parameters<typeof openChat>[1] = {}) {
     const width = Math.min(term.columns - 2, Math.max(...lines.map(visibleWidth)) + 4);
     const h = ui.showOverlay(panel = new StatsPanel(lines, () => term.rows, () => { h.hide(); panel = null; }, () => ui.requestRender()), { width, maxHeight: "100%" });
   };
-  const base = new CombinedAutocompleteProvider([{ name: "stats", description: "usage per day and week, view and session stats" }], process.cwd(), null);
+  // /summaries: off at start, then each command shows or hides it; the pump's events arrive from the start
+  let shown: OverlayHandle | null = null;
+  const toggleSummaries = () => {
+    if (term.columns < 100) return out.info("/summaries needs a terminal at least 100 columns wide");
+    if (!shown) shown = ui.showOverlay(summaries, { anchor: "top-right", width: "30%", nonCapturing: true, visible: (w) => w >= 100 });
+    else shown.setHidden(!shown.isHidden());
+    ui.requestRender();
+  };
+  const tick = setInterval(() => { if (shown && !shown.isHidden() && summaries.running()) ui.requestRender(); }, 1000); // elapsed times
+  process.on("exit", () => clearInterval(tick));
+  const base = new CombinedAutocompleteProvider([
+    { name: "stats", description: "usage per day and week, view and session stats" },
+    { name: "summaries", description: "show or hide the compactor calls and the lines they write" },
+    { name: "s", description: "short for /summaries" },
+  ], process.cwd(), null);
   editor.setAutocompleteProvider({ // slash commands only: no file completion
     getSuggestions: (lines, l, c, opt) => (l === 0 && lines[0].slice(0, c).startsWith("/") && !lines[0].slice(0, c).includes(" ") ? base.getSuggestions(lines, l, c, opt) : Promise.resolve(null)),
     applyCompletion: (...a) => base.applyCompletion(...a),
@@ -244,6 +298,7 @@ export async function tui(dir: string, o: Parameters<typeof openChat>[1] = {}) {
     if (!text.trim()) return;
     editor.addToHistory(text);
     if (text.trim() === "/stats") return openStats();
+    if (["/summaries", "/s"].includes(text.trim())) return toggleSummaries();
     if (!working) busy(true);
     pending.push(text);
     session.input(text); // while a turn runs, it goes to the running call; out.user moves it into the chat (at once when it opens a turn)
