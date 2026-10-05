@@ -35,10 +35,12 @@ optchat (harness, plain terminal REPL)
 ├─ turn       priming call + one `claude -p` per turn, stream-json in/out, logging
 ├─ mcp        `optchat mcp`: read-only stdio MCP server with zoom/date
 ├─ persist    git commit of the data dir after each turn
-└─ cli        REPL (repl.ts), `browse` (HTML export), `import-optmem`, `view`, `stats`
+└─ cli        chat (tui.ts on a terminal, repl.ts otherwise), `browse` (HTML export), `import-optmem`, `view`, `stats`
 ```
 
-No other runtime dependencies. Use only Bun built-ins and `node:` modules.
+No other runtime dependencies. Use only Bun built-ins and `node:` modules. The one
+exception, by the user's request (2026-10-05): `@earendil-works/pi-tui` (pinned, `bun
+install`) for the chat's TUI, `tui.ts` only; nothing else imports it.
 The only possible exception is `@modelcontextprotocol/sdk` for the MCP server,
 and only if a hand-written JSON-RPC stdio loop turns out to be impractical;
 prefer the hand-written loop, it is about 60 lines.
@@ -470,8 +472,8 @@ inline JSON string built once (`mcpConfig(dir)`) that launches `bun src/cli.ts m
 ## 10. CLI, import, browse, checks
 
 - `optchat`: take the lock, load, fold the view, start the pump, **print the
-  view** (gist §10), then read messages from stdin. Plain output with no TUI
-  redraws, so the terminal scrollback works.
+  view** (gist §10), then read messages from stdin. On a terminal this is a TUI in
+  the main screen (pi-tui), so the terminal scrollback works; otherwise plain lines.
   - **Multi-line input:** line-based reading would turn a pasted block into one
     message per line. On a TTY, switch the terminal to bracketed paste mode
     (`ESC[?2004h` at start; `ESC[?2004l` on exit and before suspending): text
@@ -481,7 +483,10 @@ inline JSON string built once (`mcpConfig(dir)`) that launches `bun src/cli.ts m
   - While a turn runs, typed messages become mid-run messages (§5.2).
   - While waiting in `settle`, show `waiting for N summaries…`.
   - Ctrl-C cancels the current wait or turn; a second Ctrl-C while idle exits.
-  - **As built** (`repl.ts`, `persist.ts`; `cli.ts` calls `repl(DIR)` when there is no command).
+  - **As built** (`repl.ts`, `tui.ts`, `persist.ts`; `cli.ts` calls `repl(DIR)` when there is no
+    command, and `repl` hands over to `tui(DIR)` when stdin and stdout are both terminals).
+    Shared by both (`boot` and `header` in `repl.ts`): the lock, the system prompt, the
+    session, the commit after each turn, `quit`, and the startup header below.
     Start: lock (a second process exits 1 with `optchat: another optchat is already running
     on <dir>`), the reaper of §5.2 armed, the load `problems` on stderr, the last 5 view
     lines of one user or talk message each, every one cut to one terminal row with `…`
@@ -490,7 +495,8 @@ inline JSON string built once (`mcpConfig(dir)`) that launches `bun src/cli.ts m
     in `view.ts` plus the REPL (`optchat: N messages, FIRST → LAST, last 2h ago`;
     `view 41.6/128 KB (32%), L lines · P summaries pending[, K view lines unsummarized]`,
     P counting every unbuilt node over a full pair, an upper bound on compactor calls;
-    `DIR · master M · Ctrl-C cancels, Ctrl-D exits`) and the prompt `> `. Every model
+    plain mode: `DIR · master M`; the TUI shows the key hints instead, and the data dir,
+    view fill and model in its footer). Every model
     call appends `{date, kind, model, usage}` to `usage.jsonl` in the data dir (`logUsage`,
     committed with the rest): `kind` is `turn` (the `result` event's `usage`, the sum over
     the turn's API requests), `compact` (one line per summarizer try, its `result`'s
@@ -501,32 +507,47 @@ inline JSON string built once (`mcpConfig(dir)`) that launches `bun src/cli.ts m
     is in §2. Lines from before 2026-10-04 have only `{date, usage}` and count as turns.
     A failed write is reported and never fails the call. Calls that end without a
     usage (cancelled, crashed) are not logged.
-    - *Keys* (TTY, raw mode, bracketed paste; `createKeys`, a parser that copes with
-      chunks cut anywhere): printable text, Enter sends, Backspace, Ctrl-U clears, Ctrl-D
-      on an empty line exits, Ctrl-C, Ctrl-Z; arrows and every other sequence are dropped.
-      A paste is one message with its newlines (CR and CRLF become LF; a pasted newline
-      can't be backspaced). The message is trimmed. Stdin not a TTY: one message per line,
-      echoed as `> text`, no prompt; at the end of the input the turn is finished and the
-      process exits. Lines that arrive during a turn are mid-run messages. Dim lines use
-      colour only when stdout is a terminal.
-    - *Screen*: only `text` (raw), `thinking` and `info` (dim lines) are written, plus `\r`
-      and erase-line on the input line itself; no other cursor movement. Output that
-      arrives while you type (a tool line, a compactor report) erases the input line,
-      prints, and brings `> what you typed` back below the next finished line. A prompt is
-      drawn only when idle (or when text is pending). Known limits: only the last row of
-      a wrapped or pasted input is erased; wide characters back up one column. Control
-      characters other than `\n` and `\t` (and C1) are stripped from model and tool text,
-      so a fetched page or a `cat` can't drive the terminal (ESC, OSC 52, …).
+    - *TUI* (`tui.ts`, since 2026-10-05; replaced the hand-made raw-mode screen and its
+      `createKeys` parser). `TuiMainScreen` + `ProcessTerminal`: the document is the
+      startup header, the chat, the editor and a two-line footer; it looks like pi's
+      interactive mode with pi's "dark" theme colours (okhsl values converted once).
+      User messages: Markdown on the user background. Assistant text and thoughts: one
+      Markdown per streamed run (`setText` on each delta), thoughts italic; a thinking
+      block without text is one italic `thought for ~N tokens` line. Tools: a box per call
+      (pending background, then success or error), title `$ command` for Bash (5 lines at
+      most) or `name {json}` (300 chars at most), then up to 10 output lines and
+      `... (N more lines, Ctrl-O to expand)`. Info lines dim, errors in the error colour. The editor's top
+      border shows `── ⠧ Working ───` while a turn runs. Footer: data dir · `stats()` fill
+      line (recomputed only after the view changed), then session totals of the turns
+      `↑input ↓output Rread Wwrite CHhit%` (hit of the last turn) left and `MODEL • EFFORT`
+      right. Model and tool text is stripped of control characters (`plain`) and tabs.
+      A message sent while a turn runs waits above the editor as a dim `queued: text` line
+      (pi's pending messages) and becomes a user box only when it enters the chat: when
+      claude takes it (its replay event) or when it opens the next turn, or when a cancel
+      logs it unanswered. So it never splits a streamed run. Every block (user box, run,
+      tool box, info line) comes after one blank line, as pi's `Spacer(1)`.
+      `turn.ts`'s `Out` has optional structured hooks (`error`, `thought`, `tool`,
+      `result`, `usage`, `user`); `full(out)` fills the missing ones with the dim lines plain
+      mode prints (`→ …`, `← …`, the usage line; `user` prints nothing, the terminal shows
+      what was typed).
+    - *Keys* (TUI): pi-tui's `Editor` (multi-line, bracketed paste, a paste over 10 lines
+      shown as a marker and sent whole, Shift-Enter or Ctrl-J for a newline, Up/Down
+      history of what was sent). Enter sends (while a turn runs, to the running call, §5.2);
+      Esc cancels a running turn; Ctrl-D on an empty editor exits; Ctrl-O toggles all tool
+      boxes between the preview and the whole title and output (pi's `app.tools.expand`). Plain mode (stdin or
+      stdout not a terminal): one message per line, echoed as `> text`; at the end of the
+      input the turn is finished and the process exits. Dim lines use colour only when
+      stdout is a terminal.
     - *Ctrl-C*: a running or waiting turn is cancelled (`cancelled (Ctrl-C again
       exits)`); idle, the typed line is dropped and a hint is printed. A second Ctrl-C with
-      no other key in between exits: `session.stop()`, wait for the turn loop (so the
+      no other key in between exits (Ctrl-C idle clears the editor): `session.stop()`, wait for the turn loop (so the
       messages the call never took are logged), `chat.close()`, a last commit, exit 0.
       Ctrl-D exits the same way.
-    - *Ctrl-Z*: the terminal is given back, the whole job is stopped with `SIGTSTP` to the
+    - *Ctrl-Z*: the terminal is given back (`ui.stop()`), the whole job is stopped with `SIGTSTP` to the
       process group (the `claude` children stop with it), and after `fg` the terminal is
-      taken again with the typed text still there.
-    - *Exit paths*: bracketed paste off, raw mode off, a newline if the cursor is
-      mid-line, and the system-prompt temp dir removed, on a normal exit, a signal
+      taken again (`ui.start()`, full redraw) with the typed text still there.
+    - *Exit paths*: the TUI stopped (`ui.stop()`: raw mode and bracketed paste off, cursor
+      shown), and the system-prompt temp dir removed, on a normal exit, a signal
       (`reapChildren` turns SIGINT/SIGTERM/SIGHUP into `process.exit(128+n)`) and an
       uncaught error. The directory goes first and the terminal writes are guarded: with
       the terminal already gone (SIGHUP when a window closes) a write throws.
@@ -573,7 +594,7 @@ inline JSON string built once (`mcpConfig(dir)`) that launches `bun src/cli.ts m
   bytes): 255 nodes, 173 free, 82 need the model.
 - `src/selfcheck.test.ts` (`bun test`): **few tests, only for real failure scenarios; no
   per-function suites; no mutation runs** (breaking code on purpose to test the tests).
-  No model calls. 20 tests, about 380 lines, ~1.1 s (it had 58, and 64 after step 5; the
+  No model calls. 19 tests, about 380 lines, ~1.1 s (it had 58, and 64 after step 5; the
   user asked for a lean suite; step 6 added one test). What is covered:
   - view and pump: the view-block cut points; the fit invariants over 1200 random
     messages (tiles `[0,T)`, under budget once parents exist, never splits, refold equals
@@ -586,10 +607,8 @@ inline JSON string built once (`mcpConfig(dir)`) that launches `bun src/cli.ts m
   - priming: the flags and blocks equal the turn's, the background priming runs once; a
     failing priming is reported once; a cancel during priming;
   - children: a harness that exits, is terminated or is killed leaves no `claude` behind;
-    every test reaps its children and no fake survives the run (§16.4);
-  - the terminal input: a bracketed paste is ONE message wherever the terminal cuts its
-    chunks (inside a marker, between CR and LF), and Enter outside a paste sends (the one
-    test step 6 added: line-based reading of a paste is the failure the REPL exists to avoid).
+    every test reaps its children and no fake survives the run (§16.4).
+    (The paste test of step 6 went with `createKeys`: pi-tui's `Editor` reads the input now.)
 
   Left untested on purpose, because they restated the code or were low risk: exact flags
   and prompt files, the tool descriptions, the MCP protocol, the CLI end to end, `browse`,
@@ -823,7 +842,8 @@ The rules this build runs under. They come from the user, through the orchestrat
 session `claude-e6` (Herdr pane `wR:p1`); the build session is `optchat-impl` (pane `wR:pK`).
 
 - **Stack and style:** Bun + TypeScript, no new dependencies (Bun built-ins and `node:`
-  only). KISS, no abstraction the spec doesn't need, code that reads like its neighbours
+  only). The one allowed dependency, by the user's request (2026-10-05):
+  `@earendil-works/pi-tui` for the TUI (§1, §10). KISS, no abstraction the spec doesn't need, code that reads like its neighbours
   (2 spaces, double quotes, terse comments; a `ponytail:` comment marks a deliberate
   shortcut with its ceiling and upgrade path).
 - **Process:** follow §12 strictly. `bun test` green at the end of each step. A
@@ -888,7 +908,7 @@ Written at the end of step 4 and updated at the end of steps 5 and 6, so that a 
 | 5 prime | 240cfac (orphan fix), d2d2968 (proxy), ff3d093 | done, §6 as built, §14 F1–F6 |
 | 6 REPL | 4ac3180 | done, §10 as built, §14 R1–R7 (§16.7) |
 
-`bun test`: 20 tests in one file, ~1.1 s, no model calls (§10: the suite was trimmed after
+`bun test`: 19 tests in one file, ~1.1 s, no model calls (§10: the suite was trimmed after
 step 5; step 6 added the paste test). Commits 84bc1b5 and d9d69f6 (the step 4 handover),
 9f415f7 (the proxy bound to loopback), 7af5d59 (the step 5 handover), 8204193 and d20ad9c
 (the test trim and its temp-dir clean-up) are outside the steps. The tool is complete:
@@ -908,18 +928,20 @@ step 5; step 6 added the paste test). Commits 84bc1b5 and d9d69f6 (the step 4 ha
 | `chat.ts` | `openChat`: lock + `loadChat` + pump + `log()` |
 | `prime.ts` | `createPrimer` (§6): `prime(view)`, `stop()` |
 | `turn.ts` | `writeSystemPrompt`, `mcpConfig`, `masterArgs`, `cap`, `createMapper`, `createSession` (the turn loop, foreground and idle priming, `input`/`cancel`/`stop`/`whenIdle`, the `onIdle` option) |
-| `repl.ts` | `createKeys` (the raw-input parser: keys, bracketed paste, cut chunks), `repl(dir, openChat options)`: screen, keys, Ctrl-C/Ctrl-Z, exit paths (§10 as built) |
+| `repl.ts` | `boot` (lock, session, commit per turn, `quit`), `header` (startup tail + `stats`), `plain`, `repl(dir, openChat options)`: plain line mode, or `tui` on a terminal (§10 as built) |
+| `tui.ts` | `tui(dir, openChat options)`: the pi-tui chat (theme, chat blocks, tool boxes, working border, footer, keys, Ctrl-Z) |
 | `persist.ts` | `commitData(dir, msg)`: the data dir's own git repo, one commit per turn (§10) |
 | `mcp.ts` | `TOOLS`, `zoom`, `date`, `serveMcp` |
 | `import.ts`, `browse.ts` | `parseOptmem`/`importOptmem`; `browseHtml` |
 | `usage.ts` | `logUsage` (one line per model call), `aggregate`, `isoWeek`, `hit`, `table` (`optchat stats`) |
 | `cli.ts` | no command: `repl(DIR)`; `view`, `stats`, `browse`, `import-optmem`, `mcp` |
-| `fake-claude.ts` | test double for `claude -p` (format in its header; exits on a closed stdin and on SIGTERM) |
-| `selfcheck.test.ts` | the 20 tests (§10) |
+| `fake-claude.ts` | test double for `claude -p` (format in its header, `$sleep` and `$take` for demos; reads stdin all the time; exits on a closed stdin and on SIGTERM) |
+| `selfcheck.test.ts` | the 19 tests (§10) |
 | `fixtures/` | `turn-tools.jsonl`, `turn-thinking.jsonl`: real master streams, sanitized |
 
 `prompts/`: `compact.txt` (gist §4.4 verbatim), `scale.txt` (512 bytes), `master.txt`,
-`view_doc.txt`: each is derived from the gist by hand (no test re-derives them). `dev/`: `wire-proxy.ts`, `wire.ts`.
+`view_doc.txt`: each is derived from the gist by hand (no test re-derives them). `dev/`: `wire-proxy.ts`, `wire.ts`,
+`tui-demo.sh` (+ `tui-demo.ts`: the TUI on `/tmp/oc-tui` with the fake `claude` replaying a slowed demo stream).
 
 ### 16.3 Running things
 
@@ -1020,6 +1042,10 @@ Built as §6 "As built" says and measured as §14 F1–F6 says. To repeat the fu
   ended inconclusive (F6).
 
 ### 16.7 Step 6 (REPL): done
+
+Superseded on 2026-10-05 by the TUI (§10 *TUI*): the screen state, `createKeys` and the
+"not planned" list below describe the plain REPL that came before; plain mode keeps only
+the line-per-message path. The rest (options, `onIdle`, exit paths) still holds.
 
 Built as §10 "As built" says (`repl.ts`, `persist.ts`, small changes in `turn.ts`, `claude.ts`,
 `cli.ts`) and checked as §14 R1–R7 says. What to know when touching it:

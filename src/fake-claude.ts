@@ -10,7 +10,10 @@
 //                         {events: [...]}         raw events printed in order; the pseudo events
 //                                                 {"$wait": true}    block until another user message arrives (it is logged)
 //                                                 {"$replay": true}  print the replay event of the latest message
+//                                                 {"$take": true}    print a replay event for each message that arrived
+//                                                                    meanwhile, as claude takes them (no wait)
 //                                                 {"$hang": true}    never go on, like {hang}
+//                                                 {"$sleep": ms}     pause (a demo sees the stream arrive)
 // It exits when its stdin closes (also while hung) and on SIGTERM (the default action).
 import { appendFileSync, readFileSync } from "node:fs";
 
@@ -21,14 +24,17 @@ const put = (o: object) => appendFileSync(log, JSON.stringify(o) + "\n");
 const emit = (o: object) => console.log(JSON.stringify(o));
 put({ argv: process.argv.slice(2), env: { DISABLE_PROMPT_CACHING: process.env.DISABLE_PROMPT_CACHING, CLAUDE_CODE_PROMPT_CACHE_TTL: process.env.CLAUDE_CODE_PROMPT_CACHE_TTL }, pid: process.pid });
 
-const lines = console[Symbol.asyncIterator]();
-let last: any;
+// stdin is read all the time (a message is logged when it arrives); next() takes the oldest one not yet taken
+const inbox: any[] = [];
+let last: any, closed = false, wake = () => {};
+void (async () => {
+  for await (const line of console) if (line.trim()) { const m = JSON.parse(line); put({ message: m }); inbox.push(m); wake(); }
+  closed = true;
+  wake();
+})();
 const next = async () => {
-  for (;;) {
-    const { value, done } = await lines.next();
-    if (done) return null;
-    if (value.trim()) { put({ message: (last = JSON.parse(value)) }); return last; }
-  }
+  while (!inbox.length && !closed) await new Promise<void>((r) => (wake = r));
+  return inbox.length ? (last = inbox.shift()) : null;
 };
 // Never answers, but goes on reading stdin like a hung claude: a closed stdin (the parent is gone) ends the process.
 // A step that stops reading leaves a hung-up stdin unread, and bun's event loop then spins at 100% CPU, orphaned.
@@ -42,7 +48,9 @@ for (let n = 0; await next(); n++) {
     for (const e of s.events) {
       if (e.$wait) await next();
       else if (e.$replay) emit({ type: "user", isReplay: true, message: { role: "user", content: last.message.content } });
+      else if (e.$take) while (inbox.length) emit({ type: "user", isReplay: true, message: { role: "user", content: (last = inbox.shift()).message.content } });
       else if (e.$hang) await hang();
+      else if (e.$sleep) await Bun.sleep(e.$sleep);
       else emit(e);
     }
     continue;

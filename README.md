@@ -20,10 +20,11 @@ OptChat is a chat that never ends. Its history is its memory. The memory is a bi
 
 ## Install
 
-Clone the repository and make a symlink to the entry point:
+Clone the repository, install the one dependency ([pi-tui](https://github.com/earendil-works/pi/tree/main/packages/tui), for the TUI) and make a symlink to the entry point:
 
 ```sh
 git clone https://github.com/gebeer/shitty-optchat.git
+(cd shitty-optchat && bun install)
 ln -s "$PWD/shitty-optchat/src/cli.ts" ~/bin/optchat
 ```
 
@@ -33,7 +34,7 @@ Make sure that `~/bin` is in your `PATH`.
 
 | Command | What it does |
 | --- | --- |
-| `optchat` | Starts the chat. |
+| `optchat` | Starts the chat. On a terminal it is a TUI in the style of pi. With piped input, each line is one message. |
 | `optchat view` | Prints the view that the model sees. |
 | `optchat browse [out.html]` | Writes the full tree to an HTML file. The default file is `optchat.html`. |
 | `optchat stats` | Prints the token usage per day (last 14 days) and per ISO week (last 8 weeks). |
@@ -47,10 +48,16 @@ Only one chat can run on a data directory at a time.
 
 | Key | Effect |
 | --- | --- |
-| Enter | Sends the message. |
-| Ctrl-C | Cancels the current turn. When idle, press it two times to exit. |
-| Ctrl-D | Exits (on an empty line). |
+| Enter | Sends the message. During a turn, the running call gets it. |
+| Shift-Enter, Ctrl-J | Starts a new line. |
+| Up, Down | Shows the messages that you sent before. |
+| Esc | Cancels the current turn. |
+| Ctrl-C | Cancels the current turn. When idle, it clears the editor. Press it two times to exit. |
+| Ctrl-D | Exits (when the editor is empty). |
 | Ctrl-Z | Stops the chat. Type `fg` to continue. |
+| Ctrl-O | Expands or collapses the output of all tool boxes. |
+
+To try the TUI without model calls, run `dev/tui-demo.sh`. It uses a fake `claude` and a scratch directory in `/tmp/oc-tui`.
 
 ## Status
 
