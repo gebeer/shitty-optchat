@@ -37,7 +37,7 @@ Make sure that `~/bin` is in your `PATH`.
 | `optchat` | Starts the chat. On a terminal it is a TUI in the style of pi. With piped input, each line is one message. |
 | `optchat view` | Prints the view that the model sees. |
 | `optchat browse [out.html]` | Writes the full tree to an HTML file. The default file is `optchat.html`. |
-| `optchat stats` | Prints the token usage per day (last 14 days) and per ISO week (last 8 weeks). |
+| `optchat stats` | Prints the token usage per day (last 14 days) and per ISO week (last 8 weeks). Periods without model calls are hidden. |
 | `optchat import-optmem [LOG.txt]` | Adds the new notes from an OptMem log. A second run adds nothing. Close the chat first. The default log is `~/.optmem/memory/LOG.txt`. |
 
 The data is in `~/.optchat`. Set `OPTCHAT_DIR` to use a different directory.

@@ -565,10 +565,12 @@ inline JSON string built once (`mcpConfig(dir)`) that launches `bun src/cli.ts m
       once per distinct text and never fails a turn.
 - `optchat view`: print the current view (read-only, no lock).
 - `optchat stats`: read `usage.jsonl` (read-only, no lock) and print two plain tables,
-  the last 14 local days and the last 8 ISO weeks (local dates), oldest first, empty
-  periods included. Columns: calls per kind (`turn`, `compact`, `prime`), input, cache
+  the last 14 local days and the last 8 ISO weeks (local dates), oldest first. Periods
+  without model calls are hidden at rendering (`table()`; `aggregate()` keeps them); a
+  table with none left is one dim `day: no model calls` / `week: no model calls` line,
+  in the `/stats` overlay too. Columns: calls per kind (`turn`, `compact`, `prime`), input, cache
   read, cache write, output tokens, and hit = read / (input + read + write). Only the
-  header is dim, and only on a terminal; no costs, no charts.
+  header (and that line) is dim, and only on a terminal; no costs, no charts.
 - `optchat browse [out.html]`: one self-contained HTML page with the view,
   ROOT and each tree level, each entry with its range, time span and size
   (gist §10). Escape all text.

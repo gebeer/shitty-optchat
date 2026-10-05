@@ -48,8 +48,12 @@ export function aggregate(text: string, now: Date, days = 14, weeks = 8) {
 
 export const hit = (r: Row) => { const all = r.input + r.read + r.write; return all ? `${((100 * r.read) / all).toFixed(1)}%` : "–"; };
 
-// a plain table, numbers right-aligned; `dim` wraps the header (the CLI passes identity when stdout is not a terminal)
-export function table(title: string, rows: Row[], dim = (s: string) => s) {
+// a plain table, numbers right-aligned, periods without model calls left out (aggregate() keeps them); `dim` wraps the
+// header and the `<title>: no model calls` line shown instead when no period is left (the CLI passes identity when
+// stdout is not a terminal)
+export function table(title: string, all: Row[], dim = (s: string) => s) {
+  const rows = all.filter((r) => KINDS.some((k) => r.calls[k]));
+  if (!rows.length) return dim(`${title}: no model calls`);
   const n = (x: number) => x.toLocaleString("en-US");
   const head = [title, ...KINDS, "input", "cache read", "cache write", "output", "hit"];
   const body = rows.map((r) => [r.period, ...KINDS.map((k) => n(r.calls[k])), n(r.input), n(r.read), n(r.write), n(r.output), hit(r)]);

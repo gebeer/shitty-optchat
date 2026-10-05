@@ -8,7 +8,7 @@ import { createPump } from "./compactor.ts";
 import { importOptmem, parseOptmem } from "./import.ts";
 import { acquireLock, appendMessage, loadChat, newMsg } from "./store.ts";
 import { makeSummarizer } from "./summarize.ts";
-import { aggregate, hit, isoWeek } from "./usage.ts";
+import { aggregate, hit, isoWeek, table } from "./usage.ts";
 import { type Mem, built, bytes, dayOf, getNode, label, newMem, span } from "./tree.ts";
 import { createMapper, createSession, masterArgs, mcpConfig, writeSystemPrompt } from "./turn.ts";
 import { PLACEHOLDER, addMessage, addNode, cutBlocks, first, refold, stats } from "./view.ts";
@@ -414,6 +414,8 @@ test("usage aggregation: local days and ISO weeks, legacy lines are turns, bad l
   expect(hit(day[0])).toBe("–");
   expect(week.map((r) => r.period)).toEqual(["2026-W39", "2026-W40"]);
   expect(week[1].calls).toEqual({ turn: 3, compact: 1, prime: 1 }); // Sun 4 Oct and Thu 1 Oct: both W40
+  expect(table("day", day).split("\n").map((l) => l.split(" ")[0])).toEqual(["day", "2026-10-04"]); // empty days hidden
+  expect(table("day", day.slice(0, 2))).toBe("day: no model calls");
   expect(isoWeek(new Date(2026, 0, 1))).toBe("2026-W01");
   expect(isoWeek(new Date(2027, 0, 1))).toBe("2026-W53");
 });

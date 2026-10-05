@@ -81,9 +81,11 @@ class StatsPanel implements Component {
   invalidate() {}
 }
 
-// what `optchat stats` prints, styled: header muted, periods without calls dim
-const usageTable = (title: string, rows: Row[]) => table(title, rows, (s) => T.accent(s)).split("\n")
-  .map((l, i) => (i && !Object.values(rows[i - 1].calls).some(Boolean) ? T.dim(l) : i ? T.text(l) : l));
+// what `optchat stats` prints, styled: header accent, rows text, `no model calls` dim
+const usageTable = (title: string, rows: Row[]) => {
+  const t = table(title, rows, (s) => s).split("\n");
+  return t.length === 1 ? [T.dim(t[0])] : t.map((l, i) => (i ? T.text(l) : T.accent(l)));
+};
 
 const k = (n: number) => (n < 1000 ? `${n}` : n < 10_000 ? `${(n / 1000).toFixed(1)}k` : n < 1e6 ? `${Math.round(n / 1000)}k` : `${(n / 1e6).toFixed(1)}M`);
 
