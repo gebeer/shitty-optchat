@@ -26,6 +26,14 @@ export const baseArgs = (model: string, effort: string, systemFile: string, tool
   "--system-prompt-file", systemFile, "--tools", tools,
 ];
 
+// The subscription's usage windows as a rate_limit_event reports them: utilization 0..1 per window (five_hour, seven_day, ...)
+export type Limits = Record<string, number>;
+export function windows(info: any): Limits | null {
+  const w = info?.unifiedWindows, out: Limits = {};
+  for (const [k, v] of Object.entries(w ?? {})) if (typeof (v as any)?.utilization === "number") out[k] = (v as any).utilization;
+  return Object.keys(out).length ? out : null;
+}
+
 // `tap`: a file that gets every raw stdout line, to record a stream for a fixture (never commit one of a real chat)
 export function spawnClaude(args: string[], env: Record<string, string> = {}, tap?: string) {
   const child = Bun.spawn([process.env.OPTCHAT_CLAUDE ?? "claude", ...args], {
@@ -38,6 +46,7 @@ export function spawnClaude(args: string[], env: Record<string, string> = {}, ta
   const stderr = new Response(child.stderr).text(); // drained, so the pipe never fills
   const reader = child.stdout.getReader(), dec = new TextDecoder();
   let buf = "", model: string | undefined; // the model the stream reports (init, or message_start), for the usage log
+  let limits: Limits | null = null; // the latest rate_limit_event's windows, for the usage log (it comes after message_stop)
   return {
     // A claude that died early closes its stdin: the write fails with EPIPE (thrown, or a rejected promise). That must not
     // escape: kill the child, so its output ends and next()/result() report its exit code and stderr, a readable error.
@@ -61,6 +70,7 @@ export function spawnClaude(args: string[], env: Record<string, string> = {}, ta
           if (!ev) continue;
           if (ev.type === "system" && ev.subtype === "init" && ev.model) model = ev.model;
           else if (ev.type === "stream_event" && ev.event?.type === "message_start" && ev.event.message?.model) model = ev.event.message.model;
+          else if (ev.type === "rate_limit_event") limits = windows(ev.rate_limit_info);
           return ev;
         }
         const { value, done } = await reader.read();
@@ -80,6 +90,7 @@ export function spawnClaude(args: string[], env: Record<string, string> = {}, ta
       child.exited.then(() => clearTimeout(t));
     },
     model: () => model,
+    limits: () => limits,
     exited: child.exited,
     stderr: () => stderr,
   };

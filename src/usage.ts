@@ -6,9 +6,13 @@ export type CallKind = "turn" | "compact" | "prime";
 export const KINDS: CallKind[] = ["turn", "compact", "prime"];
 
 // `model` as the stream reports it (init or message_start); the stream reports no effort, so none is logged.
+// `limits` (turn and prime only): the subscription windows' utilization from the latest rate_limit_event the call saw,
+// null if it saw none (a prime is killed at message_start, before the event comes). Lines before 2026-10-05 lack it.
 // Never throws: a failed write costs the line, not the call. Returns the error message, if any.
-export function logUsage(dir: string, kind: CallKind, model: string | undefined, usage: any): string | undefined {
-  try { appendFileSync(`${dir}/usage.jsonl`, `${JSON.stringify({ date: new Date().toISOString(), kind, model: model ?? null, usage: usage ?? null })}\n`); }
+export function logUsage(dir: string, kind: CallKind, model: string | undefined, usage: any, limits?: Record<string, number> | null): string | undefined {
+  const line: any = { date: new Date().toISOString(), kind, model: model ?? null, usage: usage ?? null };
+  if (limits !== undefined) line.limits = limits;
+  try { appendFileSync(`${dir}/usage.jsonl`, `${JSON.stringify(line)}\n`); }
   catch (e: any) { return `usage.jsonl: ${e.message}`; }
 }
 

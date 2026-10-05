@@ -7,6 +7,7 @@ import { openChat } from "./chat.ts";
 import { createPump } from "./compactor.ts";
 import { importOptmem, parseOptmem } from "./import.ts";
 import { makeOpenrouterSummarizer, openrouterKey } from "./openrouter.ts";
+import { windows } from "./claude.ts";
 import { acquireLock, appendMessage, loadChat, newMsg } from "./store.ts";
 import { makeSummarizer } from "./summarize.ts";
 import { aggregate, hit, isoWeek, table } from "./usage.ts";
@@ -398,14 +399,14 @@ test("a hung fake claude ends when its harness is killed: its stdin closes, it d
   await until(() => !alive(f.starts()[0].pid), 2000);
 });
 
-test("usage aggregation: local days and ISO weeks, legacy lines are turns, bad lines skipped", () => {
+test("usage aggregation: local days and ISO weeks, legacy lines are turns, bad lines skipped; rate-limit windows", () => {
   const at = (d: number, h: number) => new Date(2026, 9, d, h).toISOString(); // local times, October 2026
   const u = (input: number, read: number, write: number, output: number) => ({ input_tokens: input, cache_read_input_tokens: read, cache_creation_input_tokens: write, output_tokens: output });
   const text = [
     { date: at(4, 23), usage: u(10, 80, 10, 5) }, // before kinds: a turn
     { date: at(4, 1), kind: "compact", model: "m", usage: u(0, 50, 50, 7) },
     { date: at(4, 2), kind: "prime", model: "m", usage: null },
-    { date: at(1, 12), kind: "turn", usage: u(1, 2, 3, 4) }, // Thursday of the previous ISO week
+    { date: at(1, 12), kind: "turn", usage: u(1, 2, 3, 4), limits: { five_hour: 0.02, seven_day: 0.04 } }, // Thursday of the previous ISO week
     { date: at(1, 12), kind: "turn", usage: u(1, 0, 0, 0) },
   ].map((e) => JSON.stringify(e)).join("\n") + "\nnot json\n";
   const { day, week } = aggregate(text, new Date(2026, 9, 4, 23, 30), 3, 2);
@@ -419,6 +420,9 @@ test("usage aggregation: local days and ISO weeks, legacy lines are turns, bad l
   expect(table("day", day.slice(0, 2))).toBe("day: no model calls");
   expect(isoWeek(new Date(2026, 0, 1))).toBe("2026-W01");
   expect(isoWeek(new Date(2027, 0, 1))).toBe("2026-W53");
+  const ev = readFileSync(`${import.meta.dir}/fixtures/turn-tools.jsonl`, "utf8").split("\n").map((l) => l && JSON.parse(l)).find((e) => e?.type === "rate_limit_event");
+  expect(windows(ev.rate_limit_info)).toEqual({ five_hour: 0.02, seven_day: 0.04 });
+  expect(windows({})).toBeNull();
 });
 
 test("OpenRouter key: the repo .env wins over the environment, then the environment, else none", () => {

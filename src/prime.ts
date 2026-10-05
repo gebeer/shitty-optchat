@@ -7,7 +7,7 @@ import { cutBlocks } from "./view.ts";
 
 // `args` is the master's argv exactly (model, effort, tools, system prompt, MCP config): any difference is a cache miss
 // `onUsage`: the input usage of message_start, all a killed call reports (its errors are the caller's, never the priming's)
-export function createPrimer(o: { args: string[]; report: (m: string) => void; onUsage?: (model: string | undefined, usage: any) => void }) {
+export function createPrimer(o: { args: string[]; report: (m: string) => void; onUsage?: (model: string | undefined, usage: any, limits: Record<string, number> | null) => void }) {
   let last: { view: string; at: number } | null = null, running: Promise<void> = Promise.resolve();
   let child: Claude | null = null, stopped = false, failed = false;
 
@@ -23,7 +23,7 @@ export function createPrimer(o: { args: string[]; report: (m: string) => void; o
         if (ev.type === "stream_event" && ev.event?.type === "message_start") { // accepted: the view is in the cache, the rest is not needed
           last = { view, at: Date.now() };
           failed = false;
-          o.onUsage?.(claude.model(), ev.event.message?.usage);
+          o.onUsage?.(claude.model(), ev.event.message?.usage, claude.limits()); // null in practice: rate_limit_event comes after message_stop
           return;
         }
       }

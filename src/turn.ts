@@ -91,7 +91,7 @@ export function createMapper(o: { log: (kind: Kind, text: string) => void; out: 
 // `onIdle`: called each time a turn loop ends (the REPL commits the data dir and shows the prompt there)
 export function createSession(o: { chat: Chat; out: Out; system: string; mcp: string; tap?: string; prime?: { idleMs: number } | false; onIdle?: () => void }) {
   const { chat } = o, out = full(o.out), args = masterArgs(o.system, o.mcp), queue: string[] = [];
-  const primer = o.prime === false ? null : createPrimer({ args, report: (m) => out.info(m), onUsage: (model, usage) => { out.prime(usage); logUsage(chat.dir, "prime", model, usage); } }), idleMs = (o.prime || { idleMs: PRIME_IDLE }).idleMs;
+  const primer = o.prime === false ? null : createPrimer({ args, report: (m) => out.info(m), onUsage: (model, usage, limits) => { out.prime(usage); logUsage(chat.dir, "prime", model, usage, limits); } }), idleMs = (o.prime || { idleMs: PRIME_IDLE }).idleMs;
   let call: Claude | null = null, sent: Sent[] = [], cancelled = false, stopped = false, abort: AbortController | null = null, loop: Promise<void> | null = null;
   let timer: ReturnType<typeof setTimeout> | undefined;
 
@@ -130,7 +130,7 @@ export function createSession(o: { chat: Chat; out: Out; system: string; mcp: st
     if (result.is_error) out.error(`error: ${clip(String(result.result), 300)}`);
     if (result.stop_reason === "refusal") out.error("the model refused this request (stop_reason: refusal)");
     out.usage(result);
-    const failed = logUsage(chat.dir, "turn", claude.model(), result.usage); // committed with the data dir
+    const failed = logUsage(chat.dir, "turn", claude.model(), result.usage, claude.limits()); // committed with the data dir
     if (failed) out.error(failed);
     left.forEach((t) => out.user(t));
     queue.unshift(...left); // not taken in time: a fresh call, with a new view

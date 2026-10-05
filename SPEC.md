@@ -57,7 +57,7 @@ prefer the hand-written loop, it is about 60 lines.
   chat/tree/YYYY-MM-DD.jsonl
   lock                       unix socket (gist §2)
   instructions.md            the user's own instructions (gist §7.2 "user's AGENTS.md")
-  usage.jsonl                one line per model call: {date, kind, model, usage} (usage.ts; §10 `optchat stats`)
+  usage.jsonl                one line per model call: {date, kind, model, usage[, limits]} (usage.ts; §10 `optchat stats`)
 ```
 
 The data dir is a git repo of its own. The harness commits it after every turn
@@ -528,6 +528,13 @@ inline JSON string built once (`mcpConfig(dir)`) that launches `bun src/cli.ts m
     the turn's API requests), `compact` (one line per summarizer try, its `result`'s
     `usage`) or `prime` (the `message_start` usage: input only, the call is killed there).
     `model` is what the stream reports (`system/init` or `message_start`), else null.
+    `turn` and `prime` lines also carry `limits`: the subscription windows' utilization
+    (0..1) from the latest `rate_limit_event` the call saw, e.g.
+    `{"five_hour": 0.11, "seven_day": 0.22}` (`rate_limit_info.unifiedWindows.*.utilization`),
+    else null. Claude Code emits that event after `message_stop`, just before `result`
+    (measured 2026-10-05, Claude Code 2.1.289), so a prime, killed at `message_start`,
+    always logs `limits: null`. Lines before 2026-10-05 have no `limits`; `optchat stats`
+    does not read it.
     No effort is logged: the stream does not report it (init only has
     `per_turn_effort_active: true`, measured with Claude Code 2.1.289); the requested one
     is in §2. Lines from before 2026-10-04 have only `{date, usage}` and count as turns.
@@ -981,7 +988,7 @@ step 5; step 6 added the paste test). Commits 84bc1b5 and d9d69f6 (the step 4 ha
 | `compactor.ts` | the pump: `createPump` (its `onJob` events), `buildFree`, `makeJob`, the `Job`/`Summarize`/`JobEvent` types |
 | `summarize.ts` | the `claude -p` `Summarize`: layout A `blocks()`, `fit()` (the size retries, both engines), `cut()`, `SCALE`, `COMPACT_FILE`, `onCall` usage hook |
 | `openrouter.ts` | `openrouterKey`, `makeOpenrouterSummarizer` (§7.1) |
-| `claude.ts` | `spawnClaude` (`send`, `next`, `result`, `kill(grace)`, `stderr`, `model` (as the stream reports it), optional `tap`), `baseArgs`; the registry of running children and the exit/signal hooks that SIGTERM them (§5.2), armed by `reapChildren()` |
+| `claude.ts` | `spawnClaude` (`send`, `next`, `result`, `kill(grace)`, `stderr`, `model` (as the stream reports it), `limits` (latest `rate_limit_event`), optional `tap`), `windows`, `baseArgs`; the registry of running children and the exit/signal hooks that SIGTERM them (§5.2), armed by `reapChildren()` |
 | `chat.ts` | `openChat`: lock + `loadChat` + pump + `log()`; picks the compactor engine |
 | `prime.ts` | `createPrimer` (§6): `prime(view)`, `stop()` |
 | `turn.ts` | `writeSystemPrompt`, `mcpConfig`, `masterArgs`, `cap`, `createMapper`, `createSession` (the turn loop, foreground and idle priming, `input`/`cancel`/`stop`/`whenIdle`, the `onIdle` option) |
@@ -990,7 +997,7 @@ step 5; step 6 added the paste test). Commits 84bc1b5 and d9d69f6 (the step 4 ha
 | `persist.ts` | `commitData(dir, msg)`: the data dir's own git repo, one commit per turn (§10) |
 | `mcp.ts` | `TOOLS`, `zoom`, `date`, `serveMcp` |
 | `import.ts`, `browse.ts` | `parseOptmem`/`importOptmem`; `browseHtml` |
-| `usage.ts` | `logUsage` (one line per model call), `aggregate`, `isoWeek`, `hit`, `table` (`optchat stats`) |
+| `usage.ts` | `logUsage` (one line per model call, `limits` for turn and prime), `aggregate`, `isoWeek`, `hit`, `table` (`optchat stats`) |
 | `cli.ts` | no command: `repl(DIR)`; `view`, `stats`, `browse`, `import-optmem`, `mcp` |
 | `fake-claude.ts` | test double for `claude -p` (format in its header, `$sleep` and `$take` for demos; reads stdin all the time; exits on a closed stdin and on SIGTERM) |
 | `selfcheck.test.ts` | the 21 tests (§10) |
