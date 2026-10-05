@@ -534,7 +534,12 @@ inline JSON string built once (`mcpConfig(dir)`) that launches `bun src/cli.ts m
       shown as a marker and sent whole, Shift-Enter or Ctrl-J for a newline, Up/Down
       history of what was sent). Enter sends (while a turn runs, to the running call, §5.2);
       Esc cancels a running turn; Ctrl-D on an empty editor exits; Ctrl-O toggles all tool
-      boxes between the preview and the whole title and output (pi's `app.tools.expand`). Plain mode (stdin or
+      boxes between the preview and the whole title and output (pi's `app.tools.expand`). `/stats` (the only slash command; the editor completes it,
+      no file completion) is never sent to the model: it opens a bordered, scrollable overlay
+      (`StatsPanel`) with `stats(mem)`, this session's turn totals and the `optchat stats`
+      tables (`usage.ts` `aggregate`/`table`, days without calls dim); arrows, PgUp/PgDn,
+      Home/End scroll, Esc or `q` closes, and while it is open no key reaches the chat (Esc
+      does not cancel a turn). Plain mode sends `/stats` like any text. Plain mode (stdin or
       stdout not a terminal): one message per line, echoed as `> text`; at the end of the
       input the turn is finished and the process exits. Dim lines use colour only when
       stdout is a terminal.
@@ -929,7 +934,7 @@ step 5; step 6 added the paste test). Commits 84bc1b5 and d9d69f6 (the step 4 ha
 | `prime.ts` | `createPrimer` (§6): `prime(view)`, `stop()` |
 | `turn.ts` | `writeSystemPrompt`, `mcpConfig`, `masterArgs`, `cap`, `createMapper`, `createSession` (the turn loop, foreground and idle priming, `input`/`cancel`/`stop`/`whenIdle`, the `onIdle` option) |
 | `repl.ts` | `boot` (lock, session, commit per turn, `quit`), `header` (startup tail + `stats`), `plain`, `repl(dir, openChat options)`: plain line mode, or `tui` on a terminal (§10 as built) |
-| `tui.ts` | `tui(dir, openChat options)`: the pi-tui chat (theme, chat blocks, tool boxes, working border, footer, keys, Ctrl-Z) |
+| `tui.ts` | `tui(dir, openChat options)`: the pi-tui chat (theme, chat blocks, tool boxes, working border, footer, keys, Ctrl-Z, `/stats` overlay) |
 | `persist.ts` | `commitData(dir, msg)`: the data dir's own git repo, one commit per turn (§10) |
 | `mcp.ts` | `TOOLS`, `zoom`, `date`, `serveMcp` |
 | `import.ts`, `browse.ts` | `parseOptmem`/`importOptmem`; `browseHtml` |

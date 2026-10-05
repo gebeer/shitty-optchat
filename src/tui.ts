@@ -2,14 +2,16 @@
 // scrollback. Top to bottom: the startup header, the chat (user messages, assistant text, tool boxes, dim info lines), the
 // editor (its top border shows the spinner while a turn runs), the footer. The session and the data dir are repl.ts's boot().
 import {
-  Box, type Component, Container, Editor, type EditorTheme, type MarkdownTheme, Markdown, ProcessTerminal, Spacer, Text,
+  type AutocompleteProvider, Box, CombinedAutocompleteProvider, type Component, Container, Editor, type EditorTheme, type MarkdownTheme, Markdown, ProcessTerminal, Spacer, Text,
   TuiMainScreen, backgroundAnsi, foregroundAnsi, getTerminalColorMode, matchesKey, parseColor, truncateToWidth, visibleWidth,
 } from "@earendil-works/pi-tui";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import type { openChat } from "./chat.ts";
 import { MASTER_EFFORT, MASTER_MODEL } from "./config.ts";
 import { boot, header, plain } from "./repl.ts";
 import type { Out } from "./turn.ts";
+import { aggregate, table, type Row } from "./usage.ts";
 import { stats } from "./view.ts";
 
 // pi's "dark" theme (theme/dark.json), converted once
@@ -52,14 +54,45 @@ class ChatEditor extends Editor {
   }
 }
 
+// the /stats overlay: a bordered, scrollable panel; ↑↓ PgUp PgDn Home End scroll, Esc or q closes
+class StatsPanel implements Component {
+  top = 0;
+  constructor(private lines: string[], private rows: () => number, private close: () => void, private redraw: () => void) {}
+  height() { return Math.max(3, Math.min(this.lines.length, this.rows() - 4)); } // body rows: the screen less the borders and a margin
+  render(w: number) {
+    const h = this.height(), max = Math.max(0, this.lines.length - h), b = T.borderMuted;
+    this.top = Math.min(Math.max(0, this.top), max);
+    const inner = Math.max(1, w - 4), pad = (s: string) => { const t = truncateToWidth(s, inner, "…"); return `${b("│")} ${t}${" ".repeat(Math.max(0, inner - visibleWidth(t)))} ${b("│")}`; };
+    const edge = (l: string, label: string, r: string) => { const t = truncateToWidth(label, Math.max(0, w - 4), ""); return b(`${l}─`) + t + b(`${"─".repeat(Math.max(0, w - 3 - visibleWidth(t)))}${r}`); };
+    const where = max ? T.muted(` ${this.top + 1}–${this.top + h} of ${this.lines.length} · ↑↓ scroll · Esc/q closes `) : T.muted(" Esc/q closes ");
+    return [edge("╭", T.accent(bold(" stats ")), "╮"), ...this.lines.slice(this.top, this.top + h).map(pad), edge("╰", where, "╯")];
+  }
+  handleInput(d: string) {
+    const h = this.height();
+    if (matchesKey(d, "escape") || d === "q" || matchesKey(d, "ctrl+c")) return this.close();
+    if (matchesKey(d, "up")) this.top--;
+    else if (matchesKey(d, "down")) this.top++;
+    else if (matchesKey(d, "pageUp")) this.top -= h;
+    else if (matchesKey(d, "pageDown") || d === " ") this.top += h;
+    else if (matchesKey(d, "home")) this.top = 0;
+    else if (matchesKey(d, "end")) this.top = this.lines.length;
+    this.redraw();
+  }
+  invalidate() {}
+}
+
+// what `optchat stats` prints, styled: header muted, periods without calls dim
+const usageTable = (title: string, rows: Row[]) => table(title, rows, (s) => T.accent(s)).split("\n")
+  .map((l, i) => (i && !Object.values(rows[i - 1].calls).some(Boolean) ? T.dim(l) : i ? T.text(l) : l));
+
 const k = (n: number) => (n < 1000 ? `${n}` : n < 10_000 ? `${(n / 1000).toFixed(1)}k` : n < 1e6 ? `${Math.round(n / 1000)}k` : `${(n / 1e6).toFixed(1)}M`);
 
 export async function tui(dir: string, o: Parameters<typeof openChat>[1] = {}) {
-  const ui = new TuiMainScreen(new ProcessTerminal());
+  const term = new ProcessTerminal(), ui = new TuiMainScreen(term);
   const head = new Container(), chatBox = new Container(), editor = new ChatEditor(ui, editorTheme, { paddingX: 1 });
   let working = false, armed = false, running = false, spinner: ReturnType<typeof setInterval> | undefined;
   let mem: Parameters<typeof stats>[0] | null = null, fill = "", fillDirty = true;
-  const total = { input: 0, output: 0, read: 0, write: 0 };
+  const total = { turns: 0, input: 0, output: 0, read: 0, write: 0 };
   let hit: number | null = null;
 
   // the chat: each block after a blank line, as pi does; a streamed run (text or thinking) grows until anything else comes
@@ -131,7 +164,7 @@ export async function tui(dir: string, o: Parameters<typeof openChat>[1] = {}) {
     },
     usage(r) {
       const u = r.usage ?? {}, i = u.input_tokens ?? 0, rd = u.cache_read_input_tokens ?? 0, wr = u.cache_creation_input_tokens ?? 0;
-      total.input += i, total.output += u.output_tokens ?? 0, total.read += rd, total.write += wr;
+      total.turns++, total.input += i, total.output += u.output_tokens ?? 0, total.read += rd, total.write += wr;
       hit = i + rd + wr ? (100 * rd) / (i + rd + wr) : null;
       ui.requestRender();
     },
@@ -171,11 +204,35 @@ export async function tui(dir: string, o: Parameters<typeof openChat>[1] = {}) {
   for (const l of h.tail) head.addChild(row(() => l.replace(/\t/g, " ")));
   head.addChild(new Spacer(1));
   head.addChild(row(() => T.dim(`optchat: ${h.stats[0]}`)));
-  head.addChild(row(() => T.dim("Enter sends · Esc cancels · Ctrl-O expands tools · Ctrl-C twice/Ctrl-D exits · Ctrl-Z suspends · ↑↓ history")));
+  head.addChild(row(() => T.dim("Enter sends · Esc cancels · Ctrl-O expands tools · /stats · Ctrl-C twice/Ctrl-D exits · Ctrl-Z suspends · ↑↓ history")));
+
+  // /stats: never sent to the model
+  let panel: StatsPanel | null = null;
+  const openStats = () => {
+    const f = `${dir}/usage.jsonl`, { day, week } = aggregate(existsSync(f) ? readFileSync(f, "utf8") : "", new Date());
+    const n = (x: number) => x.toLocaleString("en-US"), all = total.input + total.read + total.write;
+    const head = (s: string) => T.yellow(bold(s));
+    const lines = [
+      head("View"), ...(mem ? stats(mem) : []).map(T.text), "",
+      head("This session"),
+      T.text(total.turns ? `${total.turns} turn${total.turns === 1 ? "" : "s"} · input ${n(total.input)} · cache read ${n(total.read)} · cache write ${n(total.write)} · output ${n(total.output)} · hit ${all ? ((100 * total.read) / all).toFixed(1) : "–"}%` : "no turns yet"),
+      "", head("Usage per day (usage.jsonl, all model calls)"), ...usageTable("day", day),
+      "", head("Usage per ISO week"), ...usageTable("week", week),
+    ];
+    const width = Math.min(term.columns - 2, Math.max(...lines.map(visibleWidth)) + 4);
+    const h = ui.showOverlay(panel = new StatsPanel(lines, () => term.rows, () => { h.hide(); panel = null; }, () => ui.requestRender()), { width, maxHeight: "100%" });
+  };
+  const base = new CombinedAutocompleteProvider([{ name: "stats", description: "usage per day and week, view and session stats" }], process.cwd(), null);
+  editor.setAutocompleteProvider({ // slash commands only: no file completion
+    getSuggestions: (lines, l, c, opt) => (l === 0 && lines[0].slice(0, c).startsWith("/") && !lines[0].slice(0, c).includes(" ") ? base.getSuggestions(lines, l, c, opt) : Promise.resolve(null)),
+    applyCompletion: (...a) => base.applyCompletion(...a),
+    shouldTriggerFileCompletion: () => false,
+  } satisfies AutocompleteProvider);
 
   editor.onSubmit = (text) => {
     if (!text.trim()) return;
     editor.addToHistory(text);
+    if (text.trim() === "/stats") return openStats();
     if (!working) busy(true);
     pending.push(text);
     session.input(text); // while a turn runs, it goes to the running call; out.user moves it into the chat (at once when it opens a turn)
@@ -188,6 +245,7 @@ export async function tui(dir: string, o: Parameters<typeof openChat>[1] = {}) {
     ui.requestRender(true);
   };
   ui.addInputListener((data) => {
+    if (panel) return undefined; // the overlay has the keys
     if (matchesKey(data, "ctrl+c")) {
       if (armed) return exit(), { consume: true };
       armed = true;
