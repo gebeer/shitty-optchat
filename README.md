@@ -57,6 +57,7 @@ Only one chat can run on a data directory at a time.
 | Ctrl-D | Exits (when the editor is empty). |
 | Ctrl-Z | Stops the chat. Type `fg` to continue. |
 | Ctrl-O | Expands or collapses the output of all tool boxes. |
+| Ctrl-G | Opens the editor text in `$VISUAL`, else `$EDITOR`, else `vi`. When you close the editor, the text comes back. It is not sent. |
 
 Type `/stats` (the editor completes slash commands) to open a stats panel: the view, the token totals of this session and the usage tables of `optchat stats`. Up, Down, PgUp, PgDn, Home and End scroll it. Esc or `q` closes it. The model does not get `/stats`.
 

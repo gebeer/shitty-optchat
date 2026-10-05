@@ -5,8 +5,9 @@ import {
   type AutocompleteProvider, Box, CombinedAutocompleteProvider, type Component, Container, Editor, type EditorTheme, type MarkdownTheme, Markdown, ProcessTerminal, Spacer, Text,
   type OverlayHandle, TuiMainScreen, backgroundAnsi, foregroundAnsi, getTerminalColorMode, matchesKey, parseColor, truncateToWidth, visibleWidth, wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
-import { existsSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { join } from "node:path";
 import type { openChat } from "./chat.ts";
 import type { JobEvent } from "./compactor.ts";
 import { MASTER_EFFORT, MASTER_MODEL } from "./config.ts";
@@ -255,7 +256,7 @@ export async function tui(dir: string, o: Parameters<typeof openChat>[1] = {}) {
   for (const l of h.tail) head.addChild(row(() => l.replace(/\t/g, " ")));
   head.addChild(new Spacer(1));
   head.addChild(row(() => T.dim(`optchat: ${h.stats[0]}`)));
-  head.addChild(row(() => T.dim("Enter sends · Esc cancels · Ctrl-O expands tools · /stats · /summaries (/s) · Ctrl-C twice/Ctrl-D exits · Ctrl-Z suspends · ↑↓ history")));
+  head.addChild(row(() => T.dim("Enter sends · Esc cancels · Ctrl-G external editor · Ctrl-O expands tools · /stats · /summaries (/s) · Ctrl-C twice/Ctrl-D exits · Ctrl-Z suspends · ↑↓ history")));
 
   // /stats: never sent to the model
   let panel: StatsPanel | null = null;
@@ -310,6 +311,25 @@ export async function tui(dir: string, o: Parameters<typeof openChat>[1] = {}) {
     ui.start();
     ui.requestRender(true);
   };
+  // Ctrl-G, as pi's app.editor.external: the editor text in $VISUAL, else $EDITOR, else vi, with the terminal handed over; the
+  // edited text comes back into the editor, unsent. The chat may grow meanwhile: the stopped TUI draws nothing, and the forced
+  // redraw after start() draws the whole screen anew.
+  const external = async () => {
+    const cmd = process.env.VISUAL || process.env.EDITOR || "vi", tmp = mkdtempSync(join(tmpdir(), "optchat-")), file = join(tmp, "message.md");
+    try {
+      writeFileSync(file, editor.getExpandedText());
+      ui.stop();
+      let code: number;
+      try { code = await Bun.spawn(["sh", "-c", `${cmd} "$1"`, "sh", file], { stdio: ["inherit", "inherit", "inherit"] }).exited; } // a shell, as git does: $EDITOR may carry arguments
+      finally { ui.start(); ui.requestRender(true); }
+      if (code === 0) editor.setText(readFileSync(file, "utf8").replace(/\n$/, ""));
+      else out.info(`editor not used: ${cmd} ${code === 127 ? "not found" : `exited with code ${code}`}, text kept`);
+    } catch (e) {
+      out.info(`editor not used: ${(e as Error).message}, text kept`);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  };
   ui.addInputListener((data) => {
     if (panel) return undefined; // the overlay has the keys
     if (matchesKey(data, "ctrl+c")) {
@@ -322,6 +342,7 @@ export async function tui(dir: string, o: Parameters<typeof openChat>[1] = {}) {
     if (matchesKey(data, "escape") && working && !editor.isShowingAutocomplete()) { session.cancel(); out.info("cancelled"); return { consume: true }; }
     if (matchesKey(data, "ctrl+d") && editor.getText() === "") return exit(), { consume: true };
     if (matchesKey(data, "ctrl+z")) return suspend(), { consume: true };
+    if (matchesKey(data, "ctrl+g")) return void external(), { consume: true };
     if (matchesKey(data, "ctrl+o")) { expanded = !expanded; boxes.forEach((d) => d()); ui.requestRender(); return { consume: true }; }
     return undefined;
   });

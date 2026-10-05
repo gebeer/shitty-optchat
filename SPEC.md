@@ -586,6 +586,15 @@ inline JSON string built once (`mcpConfig(dir)`) that launches `bun src/cli.ts m
     - *Ctrl-Z*: the terminal is given back (`ui.stop()`), the whole job is stopped with `SIGTSTP` to the
       process group (the `claude` children stop with it), and after `fg` the terminal is
       taken again (`ui.start()`, full redraw) with the typed text still there.
+    - *Ctrl-G* (pi's `app.editor.external`; pi-tui's own `ctrl+g` is alt-screen search only):
+      the editor's whole text (`getExpandedText()`, paste markers expanded) goes to a temp
+      file, the TUI stops as for Ctrl-Z, and `sh -c '<cmd> "$1"'` runs `$VISUAL`, else
+      `$EDITOR`, else `vi` (a shell, as git does, so the variable may carry arguments) with
+      the terminal. Then the TUI starts again (forced full redraw) and, on exit code 0, the
+      file (one trailing newline dropped) replaces the editor text, unsent. Another exit code
+      (127: not found) keeps the old text and prints one info line. The temp dir is removed.
+      Allowed while a turn runs: the stopped TUI draws nothing, the chat grows meanwhile and
+      the redraw shows it. While `/stats` is open the key does nothing.
     - *Exit paths*: the TUI stopped (`ui.stop()`: raw mode and bracketed paste off, cursor
       shown), and the system-prompt temp dir removed, on a normal exit, a signal
       (`reapChildren` turns SIGINT/SIGTERM/SIGHUP into `process.exit(128+n)`) and an
@@ -975,7 +984,7 @@ step 5; step 6 added the paste test). Commits 84bc1b5 and d9d69f6 (the step 4 ha
 | `prime.ts` | `createPrimer` (§6): `prime(view)`, `stop()` |
 | `turn.ts` | `writeSystemPrompt`, `mcpConfig`, `masterArgs`, `cap`, `createMapper`, `createSession` (the turn loop, foreground and idle priming, `input`/`cancel`/`stop`/`whenIdle`, the `onIdle` option) |
 | `repl.ts` | `boot` (lock, session, commit per turn, `quit`), `header` (startup tail + `stats`), `plain`, `repl(dir, openChat options)`: plain line mode, or `tui` on a terminal (§10 as built) |
-| `tui.ts` | `tui(dir, openChat options)`: the pi-tui chat (theme, chat blocks, tool boxes, working border, footer, keys, Ctrl-Z, `/stats` and `/summaries` overlays) |
+| `tui.ts` | `tui(dir, openChat options)`: the pi-tui chat (theme, chat blocks, tool boxes, working border, footer, keys, Ctrl-Z, Ctrl-G, `/stats` and `/summaries` overlays) |
 | `persist.ts` | `commitData(dir, msg)`: the data dir's own git repo, one commit per turn (§10) |
 | `mcp.ts` | `TOOLS`, `zoom`, `date`, `serveMcp` |
 | `import.ts`, `browse.ts` | `parseOptmem`/`importOptmem`; `browseHtml` |
