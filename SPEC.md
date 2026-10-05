@@ -1155,6 +1155,8 @@ Start these only when the user says so (§15, Gate).
    stay until new calls start, then the oldest finished ones leave so the list fits the
    sidebar. `/sidebar` toggles it (registered with the slash-command autocomplete like
    `/stats`); off by default. Data comes from the pump (start, done, failed, retry), through a
-   hook like `report`, not from the usage log. Open question: pi-tui has no side-by-side
-   layout that we have used so far; check its API (columns, or an overlay anchored right)
-   before choosing how to draw it.
+   hook like `report`, not from the usage log. Drawn as a pi-tui overlay, decided by the user: `anchor: "top-right"`,
+   `width: "30%"`, `nonCapturing: true` (the editor keeps the keys), `visible: (w) => w >= 100`;
+   `/sidebar` calls `setHidden()`. It covers the right part of the chat while shown, which is
+   fine for a temporary panel. Not an `HStack`: pi-tui keeps `VStack`/`HStack` to `TuiAltScreen`,
+   and moving off `TuiMainScreen` would take the chat out of the terminal scrollback (§10).
