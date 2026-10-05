@@ -80,6 +80,7 @@ overrides only where noted):
 | `MASTER_PERMISSION` | `bypassPermissions` | env `OPTCHAT_PERMISSION_MODE`; `--permission-mode` of the master and of priming. See §4 and §14 P4: `claude -p` can't ask, so the default mode denies most tools. `dontAsk` plus an allowlist of the tools above also works. |
 | `COMPACT_MODEL` | `sonnet` | |
 | `COMPACT_EFFORT` | `medium` | gist §4.2: low effort overshoots far more |
+| `FOLD_LOW` | 0.85 | fold hysteresis (D13): once the view is over `VIEW`, `fit()` folds down to this share of it, then appends freely until it is over again |
 | `PRIME_MAX_AGE` | 270 s | re-prime when the last prime is older (5 min cache TTL minus margin) |
 | `PRIME_TIMEOUT` | 30 s | a priming call the API hasn't accepted by then is given up on |
 | `PRIME_IDLE` | 1 s | how long the view must stay unchanged before it is primed in the background |
@@ -100,7 +101,7 @@ must-haves:
 - Pump with rule 3 (`first()`), JOBS concurrency, a fixed 10 s retry forever,
   and only the first failure reported. No exponential backoff.
 - View: append `part(0,i)` and `fit()` while over budget, merging the most-due
-  built pair (`due = (T - start) / 2^(l+2)`). Never split. Refold from message 0
+  built pair (`due = (T - start) / 2^(l+2)`), with hysteresis (D13, below). Never split. Refold from message 0
   at load. Render as `id+n|text` with newlines turned into spaces, wrapped in
   `<chat>\n…\n</chat>`.
 - `settle(signal)`: resolves when every view part is built.
@@ -122,6 +123,19 @@ Write the tree/view logic as **pure functions** over in-memory arrays, so
 - View size = the sum of the node text bytes (no `id+n|` prefix). Ties in `due` go to
   the leftmost pair. `refold` uses `T = i+1` at each step with the *final* tree, so it
   equals the live fold only when the compactor kept up (the fit-invariants test asserts that case).
+- Fold hysteresis (D13): when the view goes over `VIEW`, `fit()` sets `mem.folding`. It then merges
+  the most due built pair (same rule as above) until the view is at or below `FOLD_LOW·VIEW`.
+  After that, new messages append without merges until the view is over `VIEW` again. A fold that
+  stops on an unbuilt parent keeps `mem.folding`, and the next `fit()` (the next node or message)
+  goes on down to the watermark, even when the view is under `VIEW` by then. `mem.folding` is
+  cleared only when the view is at or below the watermark **and every view part is built**. A
+  placeholder counts 29 bytes, not the part's real size, so without this rule a fold could end
+  early, and refold (which sees real sizes) would differ. `refold` starts with `folding` false.
+  Why: a prompt cache reuses only an unchanged prefix. At 100%, almost every message merged a
+  pair near the start of the view, so each prime wrote the whole view again. Measured in
+  `docs/probes/fold-hysteresis.md` (`dev/fold-replay.ts`, read-only, no model calls): after the
+  first fold, a real turn's prime writes 130 KB at 100% and 82 KB at 85%. Fold events drop from
+  331 to 7. The view is ~8% smaller (118 vs 128 KB mean).
 - Dates: `date` is ISO UTC; a message's file is its local day; `localTime()` formats
   `YYYY-MM-DD HH:MM` local (what `date(id)` returns).
 - The pump builds a job's context snapshot synchronously when it decides to start the
@@ -653,11 +667,12 @@ inline JSON string built once (`mcpConfig(dir)`) that launches `bun src/cli.ts m
   bytes): 255 nodes, 173 free, 82 need the model.
 - `src/selfcheck.test.ts` (`bun test`): **few tests, only for real failure scenarios; no
   per-function suites; no mutation runs** (breaking code on purpose to test the tests).
-  No model calls. 21 tests, about 410 lines, ~1.1 s (it had 58, and 64 after step 5; the
+  No model calls. 22 tests, about 410 lines, ~1.1 s (it had 58, and 64 after step 5; the
   user asked for a lean suite; step 6 added one test). What is covered:
   - view and pump: the view-block cut points; the fit invariants over 1200 random
     messages (tiles `[0,T)`, under budget once parents exist, never splits, refold equals
-    the live fold); pump rule 3 (messages in order, merges alongside, at most `JOBS`);
+    the live fold); fold hysteresis (a fold stops on an unbuilt parent, resumes down to
+    `FOLD_LOW` under the budget, then appends freely; refold equals it); pump rule 3 (messages in order, merges alongside, at most `JOBS`);
   - compactor: one failure test, end to end: a hung call times out, is reported once,
     and the node is retried and built (real summarizer, fake `claude`, real pump);
     OpenRouter (stubbed `fetch`): a size retry and a refetched empty reply, with the usage
@@ -706,6 +721,7 @@ inline JSON string built once (`mcpConfig(dir)`) that launches `bun src/cli.ts m
 | D10 | `prompts/master.txt` adds three lines: each turn is a fresh process, so background tasks die when the reply ends | The harness kills `claude` at the first `result` (§5); a background Bash task dies with it (step 6). The gist's harness has no such limit. Approved by the user. |
 | D11 | The compactor runs on OpenRouter (DeepSeek V4.1 Flash, prompt v2.1), not `claude -p` with sonnet, when a key is found (§7.1); amends D1/D6 for the compactor | Compaction was ~2/3 of the spend and used the subscription's quota; the user prefers API prices for a cheap model. `claude -p` stays the fallback. Approved by the user. |
 | D12 | The step marks SCALE as a made-up sample, in `<scale>` tags, not from the chat (§7) | Unmarked, the sample leaked: on 2026-10-05 Sonnet wrote its export.py story into the real node 720+2 as chat content, and the merges above carried it up (720+4, 720+8). Approved by the user. |
+| D13 | `fit()` folds with hysteresis: once over the budget it folds down to `FOLD_LOW` (85%) of it, then appends freely until over again (§3). The gist §5.2 folds only while over the budget. | At 100%, almost every message merged a pair near the start of the view, and the next prime wrote the whole view again (130 KB per turn). Hysteresis turns most messages into appends: 82 KB per turn, about -80% when turns are short, for ~8% less view. Approved by the user. |
 
 Out of scope for v1: gist §9 (spawn/tell/computer), importing old agent sessions
 other than OptMem notes, fail-closed handling of disk errors beyond what fsync
@@ -971,7 +987,7 @@ Written at the end of step 4 and updated at the end of steps 5 and 6, so that a 
 | 5 prime | 240cfac (orphan fix), d2d2968 (proxy), ff3d093 | done, §6 as built, §14 F1–F6 |
 | 6 REPL | 4ac3180 | done, §10 as built, §14 R1–R7 (§16.7) |
 
-`bun test`: 21 tests in one file, ~1.1 s, no model calls (§10: the suite was trimmed after
+`bun test`: 22 tests in one file, ~1.1 s, no model calls (§10: the suite was trimmed after
 step 5; step 6 added the paste test). Commits 84bc1b5 and d9d69f6 (the step 4 handover),
 9f415f7 (the proxy bound to loopback), 7af5d59 (the step 5 handover), 8204193 and d20ad9c
 (the test trim and its temp-dir clean-up) are outside the steps. The tool is complete:
@@ -982,7 +998,7 @@ step 5; step 6 added the paste test). Commits 84bc1b5 and d9d69f6 (the step 4 ha
 | file | what it holds |
 |---|---|
 | `config.ts` | constants (gist §1, SPEC §2, `CALL_TIMEOUT`, `KILL_GRACE`, `PRIME_*`); env overrides `OPTCHAT_MODEL`, `OPTCHAT_PERMISSION_MODE`, `OPTCHAT_DIR`, `OPTCHAT_COMPACTOR`; `COMPACT_OPENROUTER` |
-| `tree.ts` | types `Msg`/`Node`/`Coord`/`Mem`; `id+n` addressing (`span`, `label`, `coords`); `freeText`, `ready`; `built`/`getNode`/`setNode` (first write wins); `dayOf`, `localTime` |
+| `tree.ts` | types `Msg`/`Node`/`Coord`/`Mem` (`folding`: fit hysteresis state); `id+n` addressing (`span`, `label`, `coords`); `freeText`, `ready`; `built`/`getNode`/`setNode` (first write wins); `dayOf`, `localTime` |
 | `view.ts` | `fit`, `addMessage`/`addNode`, `refold`, `render`, `cutBlocks`, `allBuilt`, `first`, `context`, `settle`, `PLACEHOLDER`, `flat`, `stats` (startup header) |
 | `store.ts` | JSONL append (write + fsync), `loadChat`, `newMsg`, `committer` (persist + `addNode`), `acquireLock` |
 | `compactor.ts` | the pump: `createPump` (its `onJob` events), `buildFree`, `makeJob`, the `Job`/`Summarize`/`JobEvent` types |
@@ -1000,12 +1016,12 @@ step 5; step 6 added the paste test). Commits 84bc1b5 and d9d69f6 (the step 4 ha
 | `usage.ts` | `logUsage` (one line per model call, `limits` for turn and prime), `aggregate`, `isoWeek`, `hit`, `table` (`optchat stats`) |
 | `cli.ts` | no command: `repl(DIR)`; `view`, `stats`, `browse`, `import-optmem`, `mcp` |
 | `fake-claude.ts` | test double for `claude -p` (format in its header, `$sleep` and `$take` for demos; reads stdin all the time; exits on a closed stdin and on SIGTERM) |
-| `selfcheck.test.ts` | the 21 tests (§10) |
+| `selfcheck.test.ts` | the 22 tests (§10) |
 | `fixtures/` | `turn-tools.jsonl`, `turn-thinking.jsonl`: real master streams, sanitized |
 
 `prompts/`: `compact.txt` (gist §4.4 verbatim), `scale.txt` (512 bytes), `master.txt`,
 `view_doc.txt`: each is derived from the gist by hand (no test re-derives them). `dev/`: `wire-proxy.ts`, `wire.ts`,
-`tui-demo.sh` (+ `tui-demo.ts`: the TUI on `/tmp/oc-tui` with the fake `claude` replaying a slowed demo stream).
+`fold-replay.ts` (the read-only fold watermark replay behind D13), `tui-demo.sh` (+ `tui-demo.ts`: the TUI on `/tmp/oc-tui` with the fake `claude` replaying a slowed demo stream).
 
 ### 16.3 Running things
 

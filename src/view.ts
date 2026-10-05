@@ -1,6 +1,6 @@
 // The view (gist §5, §6): a list of tree nodes that tiles [0, T), changed only by
 // appending at the end and merging the most due pair. Pure functions over Mem.
-import { MARKS } from "./config.ts";
+import { FOLD_LOW, MARKS } from "./config.ts";
 import { type Coord, type Mem, type Msg, type Node, built, bytes, dayOf, getNode, setNode, span } from "./tree.ts";
 
 export const PLACEHOLDER = "(not summarized yet: zoom it)"; // display and fail-safe only, no call ever sees it
@@ -8,10 +8,14 @@ const partText = (mem: Mem, p: Coord) => getNode(mem, p.l, p.i)?.text ?? PLACEHO
 const partSize = (mem: Mem, p: Coord) => getNode(mem, p.l, p.i)?.size ?? bytes(PLACEHOLDER);
 export const flat = (s: string) => s.replace(/\r\n|\r|\n/g, " ");
 
-// merge the most due built pair while over budget (gist §5.2); T is the message count at that time
+// merge the most due built pair while over budget (gist §5.2); T is the message count at that time.
+// Hysteresis (D13): once over the budget, fold down to FOLD_LOW of it, then append freely until over again. A fold that
+// stops on an unbuilt parent keeps `mem.folding` and goes on at the next fit(), down to the watermark.
 export function fit(mem: Mem, T = mem.root.length) {
   let size = mem.view.reduce((s, p) => s + partSize(mem, p), 0);
-  while (size > mem.budget) {
+  const low = Math.floor(mem.budget * FOLD_LOW);
+  if (size > mem.budget) mem.folding = true;
+  while (mem.folding && size > low) {
     let best = -1, bestDue = -Infinity;
     for (let k = 0; k + 1 < mem.view.length; k++) {
       const a = mem.view[k], b = mem.view[k + 1];
@@ -24,6 +28,7 @@ export function fit(mem: Mem, T = mem.root.length) {
     size += partSize(mem, parent) - partSize(mem, a) - partSize(mem, b);
     mem.view.splice(best, 2, parent);
   }
+  if (size <= low && allBuilt(mem)) mem.folding = false; // a placeholder's size is not the part's: decide once all are built
   for (const wake of [...mem.waiters]) wake();
 }
 
@@ -41,6 +46,7 @@ export function addNode(mem: Mem, n: Node) {
 // the view is not saved: fold it again from message 0 (gist §5.2 "At load")
 export function refold(mem: Mem) {
   mem.view = [];
+  mem.folding = false;
   for (let i = 0; i < mem.root.length; i++) {
     mem.view.push({ l: 0, i });
     fit(mem, i + 1);

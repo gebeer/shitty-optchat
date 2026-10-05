@@ -9,6 +9,9 @@ export const RETRY = 10_000; // ms
 export const CALL_TIMEOUT = 300_000; // ms: a compactor call with no result by then fails like any other
 export const KILL_GRACE = 5_000; // ms: a killed claude gets SIGTERM first, SIGKILL if it is still running after this
 export const CAP = 30_000;
+// fold hysteresis (D13): once over the budget, fit() folds down to this share of it, then appends freely until over
+// again, so most new messages leave the cached view prefix alone. Measured with dev/fold-replay.ts (SPEC §3).
+export const FOLD_LOW = 0.85;
 export const MARKS = [50_000, 80_000, 100_000];
 
 export const MASTER_MODEL = process.env.OPTCHAT_MODEL ?? "opus";

@@ -57,7 +57,7 @@ const prime = (prev: string, cur: string) => {
 type R = { pct: number; msgStrict: number[]; msgPrime: number[]; userStrict: number[]; userPrime: number[]; userAt: number[]; folds: number; merges: number; sizes: number[]; blocked: number; lines: number[]; views: string[] };
 const results: R[] = [];
 for (const pct of pcts) {
-  const mem: Mem = { ...full, view: [], waiters: new Set() }, st = { folding: false, blocked: 0 };
+  const mem: Mem = { ...full, view: [], waiters: new Set(), folding: false }, st = { folding: false, blocked: 0 };
   const r: R = { pct, msgStrict: [], msgPrime: [], userStrict: [], userPrime: [], userAt: [], folds: 0, merges: 0, sizes: [], blocked: 0, lines: [], views: [] };
   let prev = render(mem), prevUser: string | null = null;
   for (let i = 0; i < T; i++) {

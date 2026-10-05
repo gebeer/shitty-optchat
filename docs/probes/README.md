@@ -22,3 +22,6 @@ and DeepInfra fp8 as the fallback.
 | subscription judge | `judge-calibration.md` | dropped: used up the Claude quota |
 
 `compactor-candidates-research.md` is the web research that picked the candidates.
+
+Other probe: `fold-hysteresis.md` (2026-10-05): the fold watermark `FOLD_LOW` (D13). The script is
+`dev/fold-replay.ts`. It needs no model calls.

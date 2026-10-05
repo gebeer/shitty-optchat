@@ -11,6 +11,7 @@ import { windows } from "./claude.ts";
 import { acquireLock, appendMessage, loadChat, newMsg } from "./store.ts";
 import { makeSummarizer } from "./summarize.ts";
 import { aggregate, hit, isoWeek, table } from "./usage.ts";
+import { FOLD_LOW } from "./config.ts";
 import { type Mem, built, bytes, dayOf, getNode, label, newMem, span } from "./tree.ts";
 import { createMapper, createSession, masterArgs, mcpConfig, writeSystemPrompt } from "./turn.ts";
 import { PLACEHOLDER, addMessage, addNode, cutBlocks, first, refold, stats } from "./view.ts";
@@ -106,12 +107,13 @@ test("the view tiles [0,T), is under budget once parents exist, never splits, an
     }
     if (at !== mem.root.length) fail("view does not end at T");
     if (size > mem.budget && mergeable(mem)) fail("over budget with a mergeable pair");
+    if (mem.folding && size > Math.floor(mem.budget * FOLD_LOW) && mergeable(mem)) fail("folding above FOLD_LOW with a mergeable pair");
     const bounds = new Set(mem.view.map((q) => span(q).id));
     for (const b of bounds) if (b < prevT && !prev.has(b)) fail(`split at ${b}`); // a boundary inside an old part
     merges += prev.size + 1 - bounds.size > 0 ? 1 : 0;
     (prev = bounds), (prevT = mem.root.length);
     if (i % 100 === 99) {
-      const live = JSON.stringify(mem.view), copy: Mem = { ...mem, view: [], waiters: new Set() };
+      const live = JSON.stringify(mem.view), copy: Mem = { ...mem, view: [], waiters: new Set(), folding: false };
       refold(copy);
       if (JSON.stringify(copy.view) !== live) fail("refold differs from the live fold");
     }
@@ -119,6 +121,29 @@ test("the view tiles [0,T), is under budget once parents exist, never splits, an
   p.stop();
   expect(merges).toBeGreaterThan(100);
   expect(mem.view.length).toBeLessThan(80); // 6000 bytes of ~200-byte lines, plus the ramp
+});
+
+test("fold hysteresis: over the budget the fold goes down to FOLD_LOW, stops on an unbuilt parent and resumes later; refold equals it", () => {
+  const mem = newMem(1000), low = Math.floor(1000 * FOLD_LOW), at = () => mem.view.map(label).join(" ");
+  const size = () => mem.view.reduce((s, p) => s + getNode(mem, p.l, p.i)!.size, 0);
+  const msg = (i: number, n: number) => { const m = user(i, n); addMessage(mem, m); addNode(mem, { l: 0, i, text: `user: ${m.text}`, size: n }); };
+  const half = (i: number) => addNode(mem, { l: 1, i, text: "s".repeat(100), size: 100 });
+  for (let i = 0; i < 5; i++) msg(i, 200);
+  expect([size(), mem.folding]).toEqual([1000, false]); // at the budget: nothing to do
+  msg(5, 200); // over: fold, but no parent is built yet
+  expect([size(), mem.folding, mem.view.length]).toEqual([1200, true, 6]);
+  half(0);
+  expect([size(), mem.folding, at()]).toEqual([900, true, "0+2 2+1 3+1 4+1 5+1"]); // under the budget, still over FOLD_LOW: waits
+  msg(6, 50);
+  expect([size(), mem.folding]).toEqual([950, true]);
+  half(1); // the fold resumes down to the watermark
+  expect([size(), mem.folding, at()]).toEqual([650, false, "0+2 2+2 4+1 5+1 6+1"]);
+  expect(size()).toBeLessThanOrEqual(low);
+  msg(7, 200), msg(8, 100); // under the budget again: append freely, though over FOLD_LOW
+  expect([size(), mem.folding, at()]).toEqual([950, false, "0+2 2+2 4+1 5+1 6+1 7+1 8+1"]);
+  const copy: Mem = { ...mem, view: [], waiters: new Set(), folding: true };
+  refold(copy);
+  expect([copy.view.map(label).join(" "), copy.folding]).toEqual([at(), false]);
 });
 
 test("pump rule 3: messages one at a time in order, merges alongside, at most JOBS at once", async () => {
