@@ -67,3 +67,30 @@ context. That is outside the approved range.
 Not measured: tokens (the usage log counts tokens, not bytes), and the case where the compactor
 lags behind. In the live fold, an unbuilt part counts as the placeholder size, so the fold ends
 only when every view part is built (`view.ts`).
+
+## Real check (2026-10-05, opus, scratch copy `/tmp/fh/oc`, not `~/.optchat`)
+
+Three turns ("Reply with just: ok/two/three"), 80 s apart, through `dev/wire-proxy.ts`. The view at
+start was 124.2/128 KB (97%) after the refold with `FOLD_LOW = 0.85`. No fold happened during the
+run.
+
+| call | cache write | cache read |
+|---|---|---|
+| prime 1 (cold: this view was never cached) | 61,202 | 5,499 |
+| turn 1 | 343 | 66,701 |
+| prime after turn 1 | 13,407 | 53,319 |
+| turn 2 | 342 | 66,726 |
+| prime after turn 2 | 13,430 | 53,319 |
+| turn 3 | 342 | 66,749 |
+| prime after turn 3 | 13,453 | 53,319 |
+
+Usage log of the real chat (fold at 100%), 2026-10-05: every prime after a changed view wrote
+60,256-61,875 tokens and read only 5,850 (the part before the view). With hysteresis, an
+append-only prime reads everything up to the 100k cut and rewrites only the last block: 13.4k
+tokens, -78%. The turns read the whole view as before.
+
+The new `limits` field: turns logged `{five_hour: 0.21-0.22, seven_day: 0.22}`; primes log `null`
+(they are killed at `message_start`, before the `rate_limit_event`).
+
+Not seen in this run: a fold event. A fold rewrites once, from the first merged pair (about the
+whole view), and then about every 15-25 KB of new messages at 85%.
