@@ -1160,3 +1160,10 @@ Start these only when the user says so (§15, Gate).
    `/sidebar` calls `setHidden()`. It covers the right part of the chat while shown, which is
    fine for a temporary panel. Not an `HStack`: pi-tui keeps `VStack`/`HStack` to `TuiAltScreen`,
    and moving off `TuiMainScreen` would take the chat out of the terminal scrollback (§10).
+4. **Footer cache hit = turn + prime for the session.** Today `CH` is the last master turn's
+   `read / (input + read + write)` only (`tui.ts` `usage()`), ~99%, because the priming call
+   took the cache write before the turn. Show the session's turn and prime calls together
+   instead (all usage so far, same formula; ~93% on the data of 2026-10-04/05), so the footer
+   reflects what a turn really costs. Compactor calls stay out of it (they are in `/stats`).
+   The prime usage reaches the TUI through a hook next to `out.usage` (today it only goes to
+   `logUsage`).
