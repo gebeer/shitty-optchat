@@ -1,72 +1,113 @@
 # optchat
 
-An implementation of Victor Taelin's [OptChat](https://gist.github.com/VictorTaelin/91837951a5ce5b38f341ec1ba1df6449).
-OptChat is a chat that never ends. Its history is its memory. The memory is a binary summary tree.
+An implementation of Victor Taelin's [OptChat](https://gist.github.com/VictorTaelin/91837951a5ce5b38f341ec1ba1df6449): a chat that never ends. The history is the memory. The memory is a binary tree of summaries.
 
-## What this implementation does
+[SPEC.md](SPEC.md) has the details. SPEC §11 lists the deviations from the gist.
 
-- A Bun harness drives `claude -p` (Claude Code). It runs on a Claude subscription, not on API billing.
-- Each user message starts one fresh `claude` call. The call gets the current view of the summary tree.
-- A compactor writes the summaries in the background: DeepSeek V4.1 Flash through OpenRouter (API billing), or sonnet through `claude -p` when no OpenRouter key is found.
-- A priming call writes the view into the prompt cache before the turn. This makes turns cheaper.
-- An MCP server gives the model two tools: `zoom` opens a summary, and `date` gives the time of a message.
+## How it works
 
-[SPEC.md](SPEC.md) has the details. Section 11 lists the deviations from the gist.
+| Part | What it does |
+| --- | --- |
+| Turn | Each message starts one new `claude -p` call (Claude Code, subscription). The call gets the view: the summary lines that fit in 128 KB. |
+| Priming | Before a turn, a short call writes the view into the prompt cache. The turn then reads it from the cache. |
+| Compactor | Writes the summary lines in the background. Default: DeepSeek V4.1 Flash on OpenRouter (API billing). Fallback: Sonnet through `claude -p`. |
+| Fold | When the view is full, the oldest pairs merge into their parent summary, down to 85% of the budget. Then new messages append freely. This keeps the cached prefix stable. |
+| Tools | An MCP server gives the model `zoom` (open a summary) and `date` (the time of a message). |
 
 ## Requirements
 
-- [Bun](https://bun.sh).
-- [Claude Code](https://docs.claude.com/en/docs/claude-code), logged in.
-- For the compactor: an OpenRouter API key, as `OPENROUTER_API_KEY=...` in a `.env` file in the repository (gitignored) or in the environment. Without it the compactor uses `claude -p`. Set `OPTCHAT_COMPACTOR=claude` to use `claude -p` anyway.
+- [Bun](https://bun.sh)
+- [Claude Code](https://docs.claude.com/en/docs/claude-code), logged in
+- Optional: an OpenRouter key for the compactor (see [Configuration](#configuration))
 
 ## Install
 
-Clone the repository, install the one dependency ([pi-tui](https://github.com/earendil-works/pi/tree/main/packages/tui), for the TUI) and make a symlink to the entry point:
-
 ```sh
 git clone https://github.com/gebeer/shitty-optchat.git
-(cd shitty-optchat && bun install)
+(cd shitty-optchat && bun install)        # one dependency: pi-tui
 ln -s "$PWD/shitty-optchat/src/cli.ts" ~/bin/optchat
 ```
 
-Make sure that `~/bin` is in your `PATH`.
+`~/bin` must be in your `PATH`.
 
-## Usage
+## Commands
 
-| Command | What it does |
+| Command | Effect |
 | --- | --- |
-| `optchat` | Starts the chat. On a terminal it is a TUI in the style of pi. With piped input, each line is one message. |
-| `optchat view` | Prints the view that the model sees. |
-| `optchat browse [out.html]` | Writes the full tree to an HTML file. The default file is `optchat.html`. |
-| `optchat stats` | Prints the token usage per day (last 14 days) and per ISO week (last 8 weeks). Periods without model calls are hidden. |
-| `optchat import-optmem [LOG.txt]` | Adds the new notes from an OptMem log. A second run adds nothing. Close the chat first. The default log is `~/.optmem/memory/LOG.txt`. |
+| `optchat` | Starts the chat. On a terminal: a TUI like pi. With piped input: one message per line. |
+| `optchat view` | Prints the view that the model gets. |
+| `optchat browse [out.html]` | Writes the full tree to an HTML file (default `optchat.html`). |
+| `optchat stats` | Prints the token use per day (14 days) and per ISO week (8 weeks). |
+| `optchat import-optmem [LOG.txt]` | Adds the new notes of an OptMem log (default `~/.optmem/memory/LOG.txt`). See below. |
 
-The data is in `~/.optchat`. Set `OPTCHAT_DIR` to use a different directory.
-The data directory is a git repository. The harness makes a commit after each turn.
-Only one chat can run on a data directory at a time.
+`import-optmem`:
 
-### Keys
+- Close the chat first. The command takes the lock.
+- It adds only the notes after the last import. A second run adds nothing.
+- Each note keeps its own date (12:00 local time).
+- A half-written last record stays for the next run.
+- It refuses a log that is shorter, or that changed at the last imported note.
+
+## Keys
 
 | Key | Effect |
 | --- | --- |
 | Enter | Sends the message. During a turn, the running call gets it. |
-| Shift-Enter, Ctrl-J | Starts a new line. |
-| Up, Down | Shows the messages that you sent before. |
-| Esc | Cancels the current turn. |
-| Ctrl-C | Cancels the current turn. When idle, it clears the editor. Press it two times to exit. |
-| Ctrl-D | Exits (when the editor is empty). |
-| Ctrl-Z | Stops the chat. Type `fg` to continue. |
-| Ctrl-O | Expands or collapses the output of all tool boxes. |
-| Ctrl-G | Opens the editor text in `$VISUAL`, else `$EDITOR`, else `vi`. When you close the editor, the text comes back. It is not sent. |
+| Shift-Enter, Ctrl-J | New line |
+| Up, Down | Earlier messages |
+| Esc | Cancels the turn |
+| Ctrl-C | Cancels the turn, or clears the editor. Two times: exit. |
+| Ctrl-D | Exit (editor empty) |
+| Ctrl-Z | Stops the chat. `fg` continues it. |
+| Ctrl-O | Expands or collapses all tool output |
+| Ctrl-G | Opens the editor text in `$VISUAL`, `$EDITOR` or `vi`. The edited text comes back unsent. |
 
-Type `/stats` (the editor completes slash commands) to open a stats panel: the view, the token totals of this session and the usage tables of `optchat stats`. Up, Down, PgUp, PgDn, Home and End scroll it. Esc or `q` closes it. The model does not get `/stats`.
+## Slash commands
 
-Type `/summaries` or `/s` to show or hide a panel at the top right with the compactor calls: the running ones with their time, then the finished ones with the summary line they wrote. It needs a terminal at least 100 columns wide. The editor keeps the keys while the panel is shown.
+The editor completes them. The model does not get them.
 
-To try the TUI without model calls, run `dev/tui-demo.sh`. It uses a fake `claude` and a scratch directory in `/tmp/oc-tui`.
+| Command | Effect |
+| --- | --- |
+| `/stats` | Panel: the view, the totals of this session, the usage tables. Arrows, PgUp, PgDn, Home, End scroll. Esc or `q` closes. |
+| `/summaries`, `/s` | Shows or hides a panel at the top right: the running compactor calls with their time, then the finished calls with their summary line. Needs 100 columns. The editor keeps the keys. |
+
+## Footer
+
+- Line 1: the data directory, the view size, the summary backlog.
+- Line 2: the tokens of this session's turns and primings (`↑` input, `↓` output, `R` cache read, `W` cache write, `CH` cache hit), then the model and effort.
+
+## Data
+
+| Path in the data directory | Content |
+| --- | --- |
+| `chat/main/*.jsonl` | The messages, one file per day |
+| `chat/tree/*.jsonl` | The summary nodes. A node never changes after it is written. |
+| `usage.jsonl` | One line per model call: kind, model, tokens. Compactor lines add `cost` (USD) and `provider`. Turn lines add `limits` (use of the 5-hour and 7-day subscription windows, 0–1). |
+
+- Default directory: `~/.optchat`
+- The directory is a git repository. optchat makes a commit after each turn.
+- Only one chat can use a directory at a time.
+
+## Configuration
+
+| Setting | Effect |
+| --- | --- |
+| `OPTCHAT_DIR` | The data directory |
+| `OPTCHAT_MODEL` | The model of the turns (default `opus`) |
+| `OPTCHAT_PERMISSION_MODE` | The permission mode of the turns. Default `bypassPermissions`: the model runs tools without a prompt. |
+| `OPTCHAT_COMPACTOR=claude` | Uses `claude -p` for the compactor |
+| `OPENROUTER_API_KEY` | The OpenRouter key: in `.env` in the repository (gitignored), or in the environment. Without a key, the compactor uses `claude -p`. |
+
+Other values (effort, view size, fold mark, compactor model) are constants in `src/config.ts`.
+
+## Development
+
+- `bun test`: 22 tests, about 1 s, no model calls.
+- `dev/tui-demo.sh`: the TUI with a fake `claude` and a scratch directory, no model calls.
+- `docs/probes/`: the measurements behind the compactor choice and the fold mark.
 
 ## Status
 
-- This project is early.
-- It is for a single user.
-- Memory merges are not yet tested on real data.
+- Early. For one user.
+- The real chat has more than 900 messages and summaries up to level 9.
+- Known defect: the compactor sometimes adds facts that are not in the messages. The `/s` panel shows each new summary line.
